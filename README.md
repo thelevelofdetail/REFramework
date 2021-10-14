@@ -21,10 +21,12 @@ Supports both DirectX 11 and DirectX 12.
 * Object Explorer
 
 ## Supported Games
+* Resident Evil 7
 * Resident Evil 2
 * Resident Evil 3
 * Resident Evil Village
 * Devil May Cry 5
+* Monster Hunter Rise
 
 ## Thanks
 [SkacikPL](https://github.com/SkacikPL) for originally creating the Manual Flashlight mod.

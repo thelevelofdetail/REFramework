@@ -640,15 +640,14 @@ void FirstPerson::update_camera_transform(RETransform* transform) {
         }
     }
 
-    if (transform->joints.size >= 1 && transform->joints.matrices != nullptr) {
+    if (transform->joints.matrices != nullptr) {
         auto joint = utility::re_transform::get_joint(*transform, 0);
 
         if (joint != nullptr) {
             joint->posOffset = Vector4f{};
             *(Vector4f*)&joint->anglesOffset = Vector4f{ 0.0f, 0.0f, 0.0f, 1.0f };
+            transform->joints.matrices->data[0].worldMatrix = m_last_camera_matrix;
         }
-
-        transform->joints.matrices->data[0].worldMatrix = m_last_camera_matrix;
     }
 }
 
@@ -759,8 +758,13 @@ void FirstPerson::update_joint_names() {
 
     auto& joints = m_player_transform->joints;
 
+#if !defined(RE8) && !defined(MHRISE)
     for (int32_t i = 0; joints.data != nullptr && i < joints.size; ++i) {
         auto joint = joints.data->joints[i];
+#else
+    for (int32_t i = 0; joints.data != nullptr && i < joints.data->numElements; ++i) {
+        auto joint = utility::re_array::get_element<REJoint>(joints.data, i);
+#endif
 
         if (joint == nullptr || joint->info == nullptr || joint->info->name == nullptr) {
             continue;

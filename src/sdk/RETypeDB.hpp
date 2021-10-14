@@ -1,9 +1,7 @@
-#pragma once
-
+#include <string_view>
 #include <cstdint>
 
-#include "RETypeDefinition.hpp"
-
+// Forward decls
 class RETypeDB;
 class REClassInfo;
 class RETypeImpl;
@@ -11,6 +9,7 @@ class REMethodImpl;
 class REPropertyImpl;
 class REParameterDef;
 class REAttributeDef;
+class REManagedObject;
 
 namespace sdk {
 struct RETypeDefinition;
@@ -22,6 +21,77 @@ struct REMethodImpl;
 struct REProperty;
 struct REPropertyImpl;
 struct REParameterDef;
+
+template <typename T, typename... Args> 
+T call_object_func(void* obj, sdk::RETypeDefinition* t, std::string_view name, Args... args);
+
+template <typename T, typename... Args> 
+T call_object_func(::REManagedObject* obj, std::string_view name, Args... args);
+
+template<typename T>
+T* get_object_field(void* obj, sdk::RETypeDefinition* t, std::string_view name, bool is_value_type = false);
+
+template<typename T>
+T* get_object_field(::REManagedObject* obj, std::string_view name, bool is_value_type = false);
+
+static void* find_native_method(sdk::RETypeDefinition* t, std::string_view method_name);
+static void* find_native_method(std::string_view type_name, std::string_view method_name);
+
+template <typename T = void>
+T* get_native_singleton(std::string_view type_name);
+}
+
+// Real meat
+#pragma once
+
+#include "RETypeDefinition.hpp"
+#include "REManagedObject.hpp"
+
+namespace sdk {
+namespace tdb70 {
+struct TDB {
+    uint32_t magic;                             // 0x0000
+    uint32_t version;                           // 0x0004
+    uint32_t initialized;                       // 0x0008
+    uint32_t numTypes;                          // 0x000C
+    uint32_t numMethods;                        // 0x0010
+    uint32_t numFields;                         // 0x0014
+    uint32_t numTypeImpl;                       // 0x0018
+    uint32_t numFieldImpl;                      // 0x001C
+    uint32_t numMethodImpl;                     // 0x0020
+    uint32_t numPropertyImpl;                   // 0x0024
+    uint32_t numProperties;                     // 0x0028
+    uint32_t numEvents;                         // 0x002C
+    uint32_t numParams;                         // 0x0030
+    uint32_t numAttributes;                     // 0x0034
+    int32_t numInitData;                        // 0x0038
+    uint32_t numAttributes2;                    // 0x003C
+    uint32_t numInternStrings;                  // 0x0040
+    uint32_t numModules;                        // 0x0044
+    int32_t devEntry;                           // 0x0048
+    int32_t appEntry;                           // 0x004C
+    uint32_t numStringPool;                     // 0x0050
+    uint32_t numBytePool;                       // 0x0054
+    void* modules;                              // 0x0058
+    sdk::RETypeDefinition (*types)[93788];      // 0x0060
+    sdk::RETypeImpl (*typesImpl)[256];          // 0x0068
+    sdk::REMethodDefinition (*methods)[703558]; // 0x0070
+    sdk::REMethodImpl (*methodsImpl)[56756];    // 0x0078
+    sdk::REField (*fields)[1];                  // 0x0080
+    sdk::REFieldImpl (*fieldsImpl)[1];          // 0x0088
+    sdk::REProperty (*properties)[256];         // 0x0090
+    sdk::REPropertyImpl (*propertiesImpl)[1];   // 0x0098
+    void* events;                               // 0x00A0
+    sdk::REParameterDef (*params)[10000];       // 0x00A8
+    class ::REAttributeDef (*attributes)[2000]; // 0x00B0
+    int32_t (*initData)[19890];                 // 0x00B8
+    void* unk;
+    int32_t (*attributes2)[256];                // 0x00C0 + 8
+    char (*stringPool)[1];                      // 0x00C8 + 8
+    uint8_t (*bytePool)[256];                   // 0x00D0 + 8
+    int32_t (*internStrings)[14154];            // 0x00D8 + 8
+};
+}
 
 namespace tdb69 {
 // todo bring these in from reclass
@@ -71,7 +141,7 @@ struct TDB {
     class ::REAttributeDef (*attributes)[2000]; // 0x00B0
     int32_t (*initData)[19890];                 // 0x00B8
     int32_t (*attributes2)[256];                // 0x00C0
-    char (*stringPool)[0];                      // 0x00C8
+    char (*stringPool)[1];                      // 0x00C8
     uint8_t (*bytePool)[256];                   // 0x00D0
     int32_t (*internStrings)[14154];            // 0x00D8
 };
@@ -329,8 +399,101 @@ struct GenericListData {
 };
 } // namespace tdb66
 
+namespace tdb49 {
+struct REMethodDefinition;
+struct REField;
+struct REProperty;
+
+#pragma pack(push, 1)
+struct REProperty {
+    uint16_t declaring_typeid; // 0x0
+    char pad_2[0x6];
+    uint32_t name_offset; // 0x8
+    uint32_t getter; // 0xc
+    uint32_t setter; // 0x10
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+struct REMethodDefinition {
+    uint32_t unk_idk : 16; // 0x0
+    uint32_t invoke_id : 16; // 0x0
+    uint16_t declaring_typeid; // 0x4
+    uint16_t vtable_index; // 0x6
+    uint32_t prototype_name_offset; // 0x8
+    char pad_c[0x4];
+    uint32_t name_offset; // 0x10
+    uint16_t flags; // 0x14
+    uint16_t impl_flags; // 0x16
+    uint32_t unk2; // 0x18
+    uint32_t params; // 0x1c
+};
+#pragma pack(pop)
+static_assert(sizeof(tdb49::REMethodDefinition) == 0x20);
+static_assert(offsetof(tdb49::REMethodDefinition, name_offset) == 0x10);
+
+#pragma pack(push, 1)
+struct REField {
+    uint64_t declaring_typeid : 16; // 0x0
+    uint64_t field_typeid : 16; // 0x0
+    uint32_t name_offset; // 0x8
+    uint16_t flags; // 0xc
+    char pad_e[0x2];
+    uint16_t unk_thingy; // 0x10
+    char pad_12[0x2];
+    uint32_t offset; // 0x14
+    uint32_t init_data_offset;
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+struct REMethodParamDef {
+    uint16_t num_params;
+    uint16_t return_typeid;
+
+    struct Param {
+        uint64_t param_typeid : 16;
+        uint64_t flags : 16;
+        uint64_t name_offset : 31;
+    } params[1];
+};
+#pragma pack(pop)
+
+#pragma pack(push, 1)
+struct TDB {
+    uint32_t magic; // 0x0
+    uint32_t version; // 0x4
+    uint32_t initialized; // 0x8
+    uint32_t numTypes; // 0xc
+    uint32_t numMethods; // 0x10
+    uint32_t numFields; // 0x14
+    uint32_t numProperties; // 0x18
+    uint32_t numEvents; // 0x1c
+    uint32_t numInitData; // 0x20
+    uint32_t numModules; // 0x24
+    uint32_t devEntry; // 0x28
+    uint32_t appEntry; // 0x2c
+    uint32_t numStringPool; // 0x30
+    uint32_t numBytePool; // 0x34
+    void* modules; // 0x38
+    sdk::RETypeDefinition (*types)[1]; // 0x40
+    sdk::REMethodDefinition (*methods)[1]; // 0x48
+    sdk::REField (*fields)[1]; // 0x50
+    sdk::REProperty (*properties)[1]; // 0x58
+    void* (*events)[0];
+    char (*stringPool)[0];
+    uint8_t (*bytePool)[1];
+    char pad_78[0x88];
+};
+#pragma pack(pop)
+}
+
+#if defined(RE8) || defined(MHRISE)
 #ifdef RE8
 struct RETypeDB_ : public sdk::tdb69::TDB {};
+#elif defined(MHRISE)
+struct RETypeDB_ : public sdk::tdb70::TDB {};
+#endif
 struct REMethodDefinition_ : public sdk::tdb69::REMethodDefinition {};
 struct REMethodImpl : public sdk::tdb69::REMethodImpl {};
 using REField_ = sdk::tdb69::REField;
@@ -347,13 +510,22 @@ using REField_ = sdk::tdb67::REField;
 struct REProperty : public sdk::tdb67::REProperty {};
 using GenericListData = sdk::tdb67::GenericListData;
 using REMethodParamDef = sdk::tdb67::REMethodParamDef;
-#else
+#elif RE2
 struct RETypeDB_ : public sdk::tdb66::TDB {};
 struct REMethodDefinition_ : public sdk::tdb66::REMethodDefinition {};
 using REField_ = sdk::tdb66::REField;
 struct REProperty : public sdk::tdb66::REProperty {};
 using GenericListData = sdk::tdb66::GenericListData;
 using REMethodParamDef = sdk::tdb66::REMethodParamDef;
+#elif RE7
+struct RETypeDB_ : public sdk::tdb49::TDB {};
+struct REMethodDefinition_ : public sdk::tdb49::REMethodDefinition {};
+using REField_ = sdk::tdb49::REField;
+struct REProperty : public sdk::tdb49::REProperty {};
+using REMethodParamDef = sdk::tdb49::REMethodParamDef;
+
+// FIX THIS!!!!
+using GenericListData = sdk::tdb66::GenericListData;
 #endif
 } // namespace sdk
 
@@ -396,6 +568,7 @@ struct REMethodDefinition : public sdk::REMethodDefinition_ {
     const char* get_name() const;
     void* get_function() const;
 
+    uint32_t get_index() const;
     int32_t get_virtual_index() const;
     uint16_t get_flags() const;
     uint16_t get_impl_flags() const;
@@ -415,6 +588,8 @@ struct REMethodDefinition : public sdk::REMethodDefinition_ {
         return get_function_t<T (*)(Args...)>()(args...); 
     }
 
+    uint32_t get_num_params() const;
+
     std::vector<uint32_t> get_param_typeids() const;
     std::vector<sdk::RETypeDefinition*> get_param_types() const;
     std::vector<const char*> get_param_names() const;
@@ -426,7 +601,7 @@ T call_object_func(void* obj, sdk::RETypeDefinition* t, std::string_view name, A
 
     if (method == nullptr) {
         // spdlog::error("Cannot find {:s}", name.data());
-        return nullptr;
+        return T{};
     }
 
     return method->call<T>(args...);
@@ -434,8 +609,61 @@ T call_object_func(void* obj, sdk::RETypeDefinition* t, std::string_view name, A
 
 template <typename T, typename... Args> 
 T call_object_func(::REManagedObject* obj, std::string_view name, Args... args) {
-    auto def = (sdk::RETypeDefinition*)obj->info->classInfo;
+    auto def = utility::re_managed_object::get_type_definition(obj);
 
     return call_object_func<T>((void*)obj, def, name, args...);
+}
+
+template<typename T>
+T* get_object_field(void* obj, sdk::RETypeDefinition* t, std::string_view name, bool is_value_type) {
+    const auto field = t->get_field(name);
+
+    if (field == nullptr) {
+        // spdlog::error("Cannot find {:s}", name.data());
+        return nullptr;
+    }
+
+    return (T*)field->get_data_raw(obj, is_value_type);
+}
+
+template<typename T>
+T* get_object_field(::REManagedObject* obj, std::string_view name, bool is_value_type) {
+    auto def = utility::re_managed_object::get_type_definition(obj);
+
+    return get_object_field<T>((void*)obj, def, name, is_value_type);
+}
+
+static void* find_native_method(sdk::RETypeDefinition* t, std::string_view method_name) {
+    const auto method = t->get_method(method_name);
+
+    if (method == nullptr) {
+        // spdlog::error("Cannot find {:s}", method_name.data());
+        return nullptr;
+    }
+
+    return method->get_function();
+}
+
+static void* find_native_method(std::string_view type_name, std::string_view method_name) {
+    auto t = sdk::RETypeDB::get()->find_type(type_name);
+
+    if (t == nullptr) {
+        //spdlog::error("Cannot find type {:s}", type_name.data());
+        return nullptr;
+    }
+
+    return find_native_method(t, method_name);
+}
+
+template <typename T>
+T* get_native_singleton(std::string_view type_name) {
+    auto t = sdk::RETypeDB::get()->find_type(type_name);
+
+    if (t == nullptr) {
+        //spdlog::error("Cannot find type {:s}", type_name.data());
+        return nullptr;
+    }
+
+    return (T*)t->get_instance();
 }
 } // namespace sdk

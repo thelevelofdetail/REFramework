@@ -37,12 +37,23 @@ public:
     bool is_ready() const { return m_game_data_initialized; }
 
     void on_frame_d3d11();
+    void on_post_present_d3d11();
     void on_frame_d3d12();
+    void on_post_present_d3d12();
     void on_reset();
     bool on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param);
     void on_direct_input_keys(const std::array<uint8_t, 256>& keys);
 
     void save_config();
+
+    enum RendererType : uint8_t {
+        D3D11,
+        D3D12
+    };
+    
+    auto get_renderer_type() const { return m_renderer_type; }
+    auto& get_d3d11_hook() const { return m_d3d11_hook; }
+    auto& get_d3d12_hook() const { return m_d3d12_hook; }
 
 private:
     void consume_input();
@@ -94,6 +105,8 @@ private:
     std::unique_ptr<Mods> m_mods;
     std::unique_ptr<REGlobals> m_globals;
     std::unique_ptr<RETypes> m_types;
+
+    RendererType m_renderer_type{RendererType::D3D11};
 
 private: // D3D misc
     void set_imgui_style() noexcept;

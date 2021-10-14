@@ -1,7 +1,7 @@
 #include <spdlog/spdlog.h>
 
 #include "mods/IntegrityCheckBypass.hpp"
-#include "mods/PositionHooks.hpp"
+#include "mods/Hooks.hpp"
 #include "mods/Camera.hpp"
 #include "mods/FirstPerson.hpp"
 #include "mods/DeveloperTools.hpp"
@@ -18,21 +18,27 @@ Mods::Mods()
 #endif
 
 #ifndef BAREBONES
-    m_mods.emplace_back(std::make_unique<PositionHooks>());
-
+    m_mods.emplace_back(std::make_unique<Hooks>());
 #ifndef RE8
-#ifndef DMC5
+
+#if defined(RE2) || defined(RE3)
     m_mods.emplace_back(std::make_unique<FirstPerson>());
 #endif
+
 #else
     m_mods.emplace_back(std::make_unique<Camera>());
 #endif
 
-#ifndef DMC5
+#if defined(RE2) || defined(RE3) || defined(RE8)
     m_mods.emplace_back(std::make_unique<ManualFlashlight>());
 #endif
+
     m_mods.emplace_back(std::make_unique<FreeCam>());
+
+#ifndef RE7
     m_mods.emplace_back(std::make_unique<SceneMods>());
+#endif
+
 #endif
 
 #ifdef DEVELOPER
@@ -66,9 +72,20 @@ void Mods::on_frame() const {
     }
 }
 
+void Mods::on_post_frame() const {
+    for (auto& mod : m_mods) {
+        mod->on_post_frame();
+    }
+}
+
 void Mods::on_draw_ui() const {
     for (auto& mod : m_mods) {
         mod->on_draw_ui();
     }
 }
 
+void Mods::on_device_reset() const {
+    for (auto& mod : m_mods) {
+        mod->on_device_reset();
+    }
+}

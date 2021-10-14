@@ -33,6 +33,10 @@ public:
         m_on_present = fn;
     }
 
+    void on_post_present(OnPresentFn fn) {
+        m_on_post_present = fn;
+    }
+
     void on_resize_buffers(OnResizeBuffersFn fn) {
         m_on_resize_buffers = fn;
     }
@@ -52,6 +56,9 @@ public:
     IDXGISwapChain3* get_swap_chain() const {
         return m_swap_chain;
     }
+
+    auto get_swapchain_0() { return m_swapchain_0; }
+    auto get_swapchain_1() { return m_swapchain_1; }
 
     ID3D12CommandQueue* get_command_queue() const {
         return m_command_queue;
@@ -76,6 +83,8 @@ public:
 protected:
     ID3D12Device4* m_device{ nullptr };
     IDXGISwapChain3* m_swap_chain{ nullptr };
+    IDXGISwapChain3* m_swapchain_0{};
+    IDXGISwapChain3* m_swapchain_1{};
     ID3D12CommandQueue* m_command_queue{ nullptr };
     UINT m_display_width{ NULL };
     UINT m_display_height{ NULL };
@@ -90,6 +99,7 @@ protected:
     std::unique_ptr<FunctionHook> m_create_swap_chain_hook{};
 
     OnPresentFn m_on_present{ nullptr };
+    OnPresentFn m_on_post_present{ nullptr };
     OnResizeBuffersFn m_on_resize_buffers{ nullptr };
     OnResizeTargetFn m_on_resize_target{ nullptr };
     OnCreateSwapChainFn m_on_create_swap_chain{ nullptr };

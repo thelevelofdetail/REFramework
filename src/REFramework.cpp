@@ -29,6 +29,9 @@ REFramework::REFramework()
     spdlog::flush_on(spdlog::level::info);
     spdlog::info("REFramework entry");
 
+    spdlog::info("Game Module Addr: {:x}", (uintptr_t)m_game_module);
+    spdlog::info("Game Module Size: {:x}", *utility::get_module_size(m_game_module));
+
 #ifdef DEBUG
     spdlog::set_level(spdlog::level::debug);
 #endif
@@ -76,16 +79,19 @@ REFramework::REFramework()
         spdlog::info("ntdll.dll not found");
     }
 
-    // Hooking D3D12 initially because we need to retrieve the command queue before the first frame then switch to D3D11 if it failed later
-    // on
-    if (!hook_d3d12()) {
-        spdlog::error("Failed to hook D3D12 for initial test.");
+    // Fixes a crash on some machines when starting the game
+#if defined(RE8) || defined(MHRISE)
+    // wait for the game to load (WTF MHRISE??)
+    while (LoadLibraryA("d3d12.dll") == nullptr) {
+        spdlog::info("Waiting");
     }
 
-    // Fixes a crash on some machines when starting the game
-#ifdef RE8
     // auto startup_patch_addr = Address{m_game_module}.get(0x3E69E50);
     auto startup_patch_addr = utility::scan(m_game_module, "40 53 57 48 83 ec 28 48 83 b9 ? ? ? ? 00");
+
+    while (!startup_patch_addr) {
+        startup_patch_addr = utility::scan(m_game_module, "40 53 57 48 83 ec 28 48 83 b9 ? ? ? ? 00");
+    }
 
     if (startup_patch_addr) {
         static auto permanent_patch = Patch::create(*startup_patch_addr, {0xC3});
@@ -93,11 +99,18 @@ REFramework::REFramework()
         spdlog::info("Couldn't find RE8 crash fix patch location!");
     }
 #endif
+
+    // Hooking D3D12 initially because we need to retrieve the command queue before the first frame then switch to D3D11 if it failed later
+    // on
+    if (!hook_d3d12()) {
+        spdlog::error("Failed to hook D3D12 for initial test.");
+    }
 }
 
 bool REFramework::hook_d3d11() {
     m_d3d11_hook = std::make_unique<D3D11Hook>();
     m_d3d11_hook->on_present([this](D3D11Hook& hook) { on_frame_d3d11(); });
+    m_d3d11_hook->on_post_present([this](D3D11Hook& hook) { on_post_present_d3d11(); });
     m_d3d11_hook->on_resize_buffers([this](D3D11Hook& hook) { on_reset(); });
 
     // Making sure D3D12 is not hooked
@@ -135,6 +148,7 @@ bool REFramework::hook_d3d12() {
 
     m_d3d12_hook = std::make_unique<D3D12Hook>();
     m_d3d12_hook->on_present([this](D3D12Hook& hook) { on_frame_d3d12(); });
+    m_d3d12_hook->on_post_present([this](D3D12Hook& hook) { on_post_present_d3d12(); });
     m_d3d12_hook->on_resize_buffers([this](D3D12Hook& hook) { on_reset(); });
     m_d3d12_hook->on_resize_target([this](D3D12Hook& hook) { on_reset(); });
     m_d3d12_hook->on_create_swap_chain([this](D3D12Hook& hook) { m_pd3d_command_queue_d3d12 = m_d3d12_hook->get_command_queue(); });
@@ -195,6 +209,8 @@ void REFramework::on_frame_d3d11() {
         return;
     }
 
+    m_renderer_type = RendererType::D3D11;
+
     consume_input();
 
     ImGui_ImplDX11_NewFrame();
@@ -225,6 +241,20 @@ void REFramework::on_frame_d3d11() {
     context->OMSetRenderTargets(1, &m_main_render_target_view_d3d11, NULL);
 
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    if (m_error.empty() && m_game_data_initialized) {
+        m_mods->on_post_frame();
+    }
+}
+
+void REFramework::on_post_present_d3d11() {
+    if (!m_error.empty() || !m_initialized || !m_game_data_initialized) {
+        return;
+    }
+
+    for (auto& mod : m_mods->get_mods()) {
+        mod->on_post_present();
+    }
 }
 
 // D3D12 Draw funciton
@@ -246,6 +276,8 @@ void REFramework::on_frame_d3d12() {
         spdlog::error("Null Command Queue");
         return;
     }
+
+    m_renderer_type = RendererType::D3D12;
 
     consume_input();
 
@@ -296,6 +328,20 @@ void REFramework::on_frame_d3d12() {
     m_pd3d_command_list_d3d12->Close();
 
     m_pd3d_command_queue_d3d12->ExecuteCommandLists(1, (ID3D12CommandList* const*)&m_pd3d_command_list_d3d12);
+
+    if (m_error.empty() && m_game_data_initialized) {
+        m_mods->on_post_frame();
+    }
+}
+
+void REFramework::on_post_present_d3d12() {
+    if (!m_error.empty() || !m_initialized || !m_game_data_initialized) {
+        return;
+    }
+    
+    for (auto& mod : m_mods->get_mods()) {
+        mod->on_post_present();
+    }
 }
 
 void REFramework::on_reset() {
@@ -313,6 +359,10 @@ void REFramework::on_reset() {
 
     if (m_is_d3d12) {
         cleanup_render_target_d3d12();
+    }
+
+    if (m_game_data_initialized) {
+        m_mods->on_device_reset();
     }
 
     m_initialized = false;
@@ -700,6 +750,10 @@ bool REFramework::initialize() {
         auto swap_chain = m_d3d12_hook->get_swap_chain();
 
         if (device == nullptr || swap_chain == nullptr || m_pd3d_command_queue_d3d12 == nullptr) {
+            spdlog::info("Device: {:x}", (uintptr_t)device);
+            spdlog::info("SwapChain: {:x}", (uintptr_t)swap_chain);
+            spdlog::info("CommandQueue: {:x}", (uintptr_t)m_pd3d_command_queue_d3d12);
+
             spdlog::info("Device or SwapChain null. DirectX 11 may be in use. Unhooking D3D12...");
 
             // We unhook D3D12

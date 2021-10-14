@@ -93,6 +93,7 @@ void FreeCam::on_update_transform(RETransform* transform) {
     }
 
     if (!update_pointers()) {
+        spdlog::error("FreeCam: Failed to update pointers");
         m_was_disabled = false;
         return;
     }
@@ -165,6 +166,7 @@ void FreeCam::on_update_transform(RETransform* transform) {
 
     // Update wanted camera position
     if (!m_lock_camera->value()) {
+#ifndef RE7
         auto timescale = sdk::get_timescale();
 
         if (timescale == 0.0f) {
@@ -172,9 +174,17 @@ void FreeCam::on_update_transform(RETransform* transform) {
         }
 
         const auto timescale_mult = 1.0f / timescale;
+#else
+        // RE7 doesn't have timescale
+        const auto timescale_mult = 1.0f;
+#endif
 
         Vector4f dir{};
+#ifndef RE7
         const auto delta = re_component::get_delta_time(transform);
+#else
+        const auto delta = sdk::call_object_func<float>(m_application.object, m_application.t, "get_DeltaTime", sdk::get_thread_context(), m_application.object);
+#endif
 
         // The rotation speed gets scaled down here heavily since "1.0f" is way too fast... This makes the slider a bit more user-friendly.
         // TODO: Figure out a conversion here to make KB+M & Controllers equal in rotation sensitivity.
@@ -250,26 +260,15 @@ void FreeCam::on_update_transform(RETransform* transform) {
 }
 
 bool FreeCam::update_pointers() {
-    // Should work for all games.
-    if (m_via_hid_gamepad.object == nullptr || m_via_hid_gamepad.t == nullptr) {
-        auto& globals = *g_framework->get_globals();
-
-        m_via_hid_gamepad.object = globals.get_native("via.hid.GamePad");
-
-        if (m_via_hid_gamepad.object != nullptr) {
-            m_via_hid_gamepad.t = (sdk::RETypeDefinition*)g_framework->get_types()->get("via.hid.GamePad")->classInfo;
-        }
-    }
-
-#ifndef RE8
-#ifndef DMC5
+#if defined(RE2) || defined(RE3)
     if (m_survivor_manager == nullptr) {
         auto& globals = *g_framework->get_globals();
         m_survivor_manager = globals.get<RopewaySurvivorManager>(game_namespace("SurvivorManager"));
         return false;
     }
 #endif
-#else
+
+#ifdef RE8
     if (m_props_manager == nullptr) {
         auto& globals = *g_framework->get_globals();
         m_props_manager = globals.get<AppPropsManager>(game_namespace("PropsManager"));
@@ -277,5 +276,17 @@ bool FreeCam::update_pointers() {
     }
 #endif
 
-    return m_via_hid_gamepad.object != nullptr && m_via_hid_gamepad.t != nullptr;
+    // Should work for all games.
+    return m_via_hid_gamepad.update() && m_application.update();
+}
+
+bool FreeCam::NativeObject::update() {
+    if (this->object != nullptr && this->t != nullptr) {
+        return true;
+    }
+
+    this->object = sdk::get_native_singleton(this->name);
+    this->t = sdk::RETypeDB::get()->find_type(this->name);
+
+    return this->object != nullptr && this->t != nullptr;
 }

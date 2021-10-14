@@ -52,18 +52,31 @@ private:
         *m_rotation_speed,
     };
 
-#ifndef RE8
+#if defined(RE2) || defined(RE3)
     RopewaySurvivorManager* m_survivor_manager{ nullptr };
-#else
+#endif
+
+#ifdef RE8
     AppPropsManager* m_props_manager{ nullptr };
 #endif
 
-    struct {
+    struct NativeObject {
+        NativeObject(const std::string& n) 
+            : name{n}
+        {
+
+        }
+
+        bool update();
+
         void* object{ nullptr };
         sdk::RETypeDefinition* t{ nullptr };
-    } m_via_hid_gamepad;
 
-    REManagedObject* m_gamepad{ nullptr };
+        std::string name{};
+    };
+
+    NativeObject m_via_hid_gamepad{ "via.hid.GamePad" };
+    NativeObject m_application{ "via.Application" };
 
     Matrix4x4f m_last_camera_matrix{ glm::identity<Matrix4x4f>() };
 

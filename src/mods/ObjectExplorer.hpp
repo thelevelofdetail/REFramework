@@ -10,15 +10,21 @@
 #ifdef DMC5
 #define TDB_DUMP_ALLOWED
 #define TDB_VER 67
-#elif RE8
+#elif defined(MHRISE)
+#define TDB_DUMP_ALLOWED
+#define TDB_VER 70
+#elif defined(RE8)
 #define TDB_DUMP_ALLOWED
 #define TDB_VER 69
 #elif RE3
 #define TDB_DUMP_ALLOWED
 #define TDB_VER 67
-#else
+#elif RE2
 #define TDB_DUMP_ALLOWED
 #define TDB_VER 66
+#elif RE7
+#define TDB_DUMP_ALLOWED
+#define TDB_VER 49
 #endif
 
 namespace sdk {
@@ -142,7 +148,7 @@ private:
     void context_menu(void* address);
     void make_same_line_text(std::string_view text, const ImVec4& color);
 
-    void make_tree_offset(REManagedObject* object, uint32_t offset, std::string_view name);
+    void make_tree_offset(REManagedObject* object, uint32_t offset, std::string_view name, std::function<void()> widget = nullptr);
     bool is_managed_object(Address address) const;
 
     void populate_classes();

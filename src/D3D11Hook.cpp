@@ -36,13 +36,15 @@ bool D3D11Hook::hook() {
     swap_chain_desc.BufferDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
     swap_chain_desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
 
-    if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_NULL, nullptr, 0, &feature_level, 1, D3D11_SDK_VERSION, &swap_chain_desc, &swap_chain, &device, nullptr, &context))) {
+    if (FAILED(D3D11CreateDeviceAndSwapChain(nullptr, D3D_DRIVER_TYPE_NULL, nullptr, 0, &feature_level, 1, D3D11_SDK_VERSION,
+            &swap_chain_desc, &swap_chain, &device, nullptr, &context))) {
         spdlog::error("Failed to create D3D11 device");
         return false;
     }
 
     auto present_fn = (*(uintptr_t**)swap_chain)[8];
     auto resize_buffers_fn = (*(uintptr_t**)swap_chain)[13];
+
     m_present_hook = std::make_unique<FunctionHook>(present_fn, (uintptr_t)&D3D11Hook::present);
     m_resize_buffers_hook = std::make_unique<FunctionHook>(resize_buffers_fn, (uintptr_t)&D3D11Hook::resize_buffers);
 
@@ -56,10 +58,10 @@ bool D3D11Hook::hook() {
 }
 
 bool D3D11Hook::unhook() {
-	if (m_present_hook->remove() && m_resize_buffers_hook->remove()) {
-		m_hooked = false;
-		return true;
-	}
+    if (m_present_hook->remove() && m_resize_buffers_hook->remove()) {
+        m_hooked = false;
+        return true;
+    }
 
     return false;
 }
@@ -68,8 +70,15 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
     auto d3d11 = g_d3d11_hook;
 
     d3d11->m_swap_chain = swap_chain;
+
+    if (d3d11->m_swapchain_0 == nullptr) {
+        d3d11->m_swapchain_0 = swap_chain;
+    } else if (d3d11->m_swapchain_1 == nullptr && swap_chain != d3d11->m_swapchain_0) {
+        d3d11->m_swapchain_1 = swap_chain;
+    }
+
     swap_chain->GetDevice(__uuidof(d3d11->m_device), (void**)&d3d11->m_device);
-    
+
     // This line must be called before calling our detour function because we might have to unhook the function inside our detour.
     auto present_fn = d3d11->m_present_hook->get_original<decltype(D3D11Hook::present)>();
 
@@ -77,10 +86,17 @@ HRESULT WINAPI D3D11Hook::present(IDXGISwapChain* swap_chain, UINT sync_interval
         d3d11->m_on_present(*d3d11);
     }
 
-    return present_fn(swap_chain, sync_interval, flags);
+    auto result = present_fn(swap_chain, sync_interval, flags);
+
+    if (d3d11->m_on_post_present) {
+        d3d11->m_on_post_present(*d3d11);
+    }
+
+    return result;
 }
 
-HRESULT WINAPI D3D11Hook::resize_buffers(IDXGISwapChain* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags) {
+HRESULT WINAPI D3D11Hook::resize_buffers(
+    IDXGISwapChain* swap_chain, UINT buffer_count, UINT width, UINT height, DXGI_FORMAT new_format, UINT swap_chain_flags) {
     auto d3d11 = g_d3d11_hook;
 
     if (d3d11->m_on_resize_buffers) {

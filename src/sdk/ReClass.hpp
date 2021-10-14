@@ -7,15 +7,21 @@
 #ifdef DMC5
 #define TDB_VER 67
 #include "ReClass_Internal_DMC5.hpp"
-#elif RE8
+#elif defined(MHRISE)
+#define TDB_VER 70
+#include "ReClass_Internal_RE8.hpp"
+#elif defined(RE8)
 #define TDB_VER 69
 #include "ReClass_Internal_RE8.hpp"
 #elif RE3
 #define TDB_VER 67
 #include "ReClass_Internal_RE3.hpp"
-#else
+#elif RE2
 #define TDB_VER 66
 #include "ReClass_Internal.hpp"
+#elif RE7
+#define TDB_VER 49
+#include "ReClass_Internal_RE7.hpp"
 #endif
 #pragma pack(pop, r1)
 
