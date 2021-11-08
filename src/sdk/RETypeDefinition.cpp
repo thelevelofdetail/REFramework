@@ -137,11 +137,14 @@ static std::shared_mutex g_full_name_mtx{};
 std::string RETypeDefinition::get_full_name() const {
     auto tdb = RETypeDB::get();
 
+#ifdef RE7
+    return tdb->get_string(this->full_name_offset); // uhh thanks?
+#else
     {
         std::shared_lock _{ g_full_name_mtx };
 
-        if (g_full_names.find(this->get_index()) != g_full_names.end()) {
-            return g_full_names[this->get_index()];
+        if (auto it = g_full_names.find(this->get_index()); it != g_full_names.end()) {
+            return it->second;
         }
     }
 
@@ -228,6 +231,7 @@ std::string RETypeDefinition::get_full_name() const {
     }
 
     return full_name;
+#endif
 }
 
 sdk::RETypeDefinition* RETypeDefinition::get_declaring_type() const {
@@ -259,8 +263,8 @@ sdk::REField* RETypeDefinition::get_field(std::string_view name) const {
     {
         std::shared_lock _{ g_field_mtx };
 
-        if (g_field_map.find(full_name) != g_field_map.end()) {
-            return g_field_map[full_name];
+        if (auto it = g_field_map.find(full_name); it != g_field_map.end()) {
+            return it->second;
         }
     }
 
@@ -291,11 +295,12 @@ sdk::REMethodDefinition* RETypeDefinition::get_method(std::string_view name) con
     {
         std::shared_lock _{g_method_mtx};
 
-        if (g_method_map.find(full_name) != g_method_map.end()) {
-            return g_method_map[full_name];
+        if (auto it = g_method_map.find(full_name); it != g_method_map.end()) {
+            return it->second;
         }
     }
     
+    // first pass, do not use function prototypes
     for (auto super = this; super != nullptr; super = super->get_parent_type()) {
         for (auto& m : super->get_methods()) {
             if (name == m.get_name()) {
@@ -306,8 +311,50 @@ sdk::REMethodDefinition* RETypeDefinition::get_method(std::string_view name) con
             }
         }
     }
+    
+    // second pass, build a function prototype
+    for (auto super = this; super != nullptr; super = super->get_parent_type()) {
+        for (auto& m : super->get_methods()) {
+            const auto method_param_types = m.get_param_types();
+            const auto method_param_names = m.get_param_names();
+
+            std::stringstream ss{};
+            ss << m.get_name() << "(";
+
+            for (auto i = 0; i < method_param_types.size(); i++) {
+                if (i > 0) {
+                    ss << ", ";
+                }
+                ss << method_param_types[i]->get_full_name();
+            }
+
+            ss << ")";
+            const auto method_prototype = ss.str();
+
+            if (name == method_prototype) {
+                std::unique_lock _{g_method_mtx};
+
+                g_method_map[full_name] = &m;
+                return g_method_map[full_name];
+            }
+        }
+    }
 
     return g_method_map[full_name];
+}
+
+std::vector<sdk::REMethodDefinition*> RETypeDefinition::get_methods(std::string_view name) const {
+    std::vector<sdk::REMethodDefinition*> out{};
+
+    for (auto super = this; super != nullptr; super = super->get_parent_type()) {
+        for (auto& m : super->get_methods()) {
+            if (name == m.get_name()) {
+                out.push_back(&m);
+            }
+        }
+    }
+
+    return out;
 }
 
 uint32_t RETypeDefinition::get_index() const {
@@ -343,8 +390,30 @@ bool RETypeDefinition::has_fieldptr_offset() const {
 #endif
 }
 
+bool RETypeDefinition::is_a(sdk::RETypeDefinition* other) const {
+    if (other == nullptr) {
+        return false;
+    }
+
+    for (auto super = this; super != nullptr; super = super->get_parent_type()) {
+        if (super == other) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool RETypeDefinition::is_a(std::string_view other) const {
+    return this->is_a(RETypeDB::get()->find_type(other));
+}
+
 via::clr::VMObjType RETypeDefinition::get_vm_obj_type() const {
     return (via::clr::VMObjType)this->object_type;
+}
+
+bool RETypeDefinition::is_value_type() const {
+    return get_vm_obj_type() == via::clr::VMObjType::ValType;
 }
 
 uint32_t RETypeDefinition::get_crc_hash() const {
@@ -363,17 +432,7 @@ uint32_t RETypeDefinition::get_crc_hash() const {
 }
 
 uint32_t RETypeDefinition::get_fqn_hash() const {
-#ifndef RE7
     return this->fqn_hash;
-#else
-    auto t = (regenny::via::typeinfo::TypeInfo*)get_type();
-
-    if (t == nullptr) {
-        return 0;
-    }
-
-    return t->fqn_hash;
-#endif
 }
 
 uint32_t RETypeDefinition::get_size() const {

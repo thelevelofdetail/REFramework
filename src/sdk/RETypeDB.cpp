@@ -10,6 +10,20 @@ RETypeDB* RETypeDB::get() {
 static std::shared_mutex g_tdb_type_mtx{};
 static std::unordered_map<std::string, sdk::RETypeDefinition*> g_tdb_type_map{};
 
+sdk::InvokeRet invoke_object_func(void* obj, sdk::RETypeDefinition* t, std::string_view name, const std::vector<void*>& args) {
+    const auto method = t->get_method(name);
+
+    if (method == nullptr) {
+        return InvokeRet{};
+    }
+
+    return method->invoke(obj, args);
+}
+
+sdk::InvokeRet invoke_object_func(::REManagedObject* obj, std::string_view name, const std::vector<void*>& args) {
+   return invoke_object_func((void*)obj, utility::re_managed_object::get_type_definition(obj), name, args);
+}
+
 sdk::RETypeDefinition* RETypeDB::find_type(std::string_view name) const {
     {
         std::shared_lock _{ g_tdb_type_mtx };
@@ -175,6 +189,18 @@ uint32_t REField::get_offset_from_base() const {
     return offset_from_fieldptr;
 }
 
+bool sdk::REField::is_static() const {
+    const auto field_flags = this->get_flags();
+
+    return (field_flags & (uint16_t)via::clr::FieldFlag::Static) != 0;
+}
+
+bool sdk::REField::is_literal() const  {
+    const auto field_flags = this->get_flags();
+
+    return (field_flags & (uint16_t)via::clr::FieldFlag::Literal) != 0;
+}
+
 void* REField::get_data_raw(void* object, bool is_value_type) const {
     const auto field_flags = get_flags();
 
@@ -263,6 +289,67 @@ void* REMethodDefinition::get_function() const {
 #endif
 }
 
+uint32_t sdk::REMethodDefinition::get_invoke_id() const {
+    auto tdb = RETypeDB::get();
+
+#if TDB_VER >= 69
+    const auto param_list = (uint32_t)this->params;
+    const auto param_ids = tdb->get_data<REParamList>(param_list);
+    const auto num_params = param_ids->numParams;
+    const auto invoke_id = param_ids->invokeID;
+#else
+    const auto invoke_id = (uint16_t)this->invoke_id;
+#endif
+
+    return invoke_id;
+}
+
+sdk::InvokeRet sdk::REMethodDefinition::invoke(void* object, const std::vector<void*>& args) const {
+    if (get_num_params() != args.size()) {
+        //throw std::runtime_error("Invalid number of arguments");
+        spdlog::warn("Invalid number of arguments passed to REMethodDefinition::invoke for {}", get_name());
+        return InvokeRet{};
+    }
+
+    const auto invoke_tbl = sdk::get_invoke_table();
+    auto invoke_wrapper = invoke_tbl[get_invoke_id()];
+
+    struct StackFrame {
+        char pad_0000[8+8]; //0x0000
+        const sdk::REMethodDefinition* method;
+        char pad_0010[24]; //0x0018
+        void* in_data; //0x0030 can point to data
+        void* out_data; //0x0038 can be whatever, can be a dword, can point to data
+        void* object_ptr; //0x0040 aka "this" pointer
+    };
+
+    InvokeRet out{};
+
+    StackFrame stack_frame{};
+    stack_frame.method = this;
+    stack_frame.object_ptr = object;
+    stack_frame.in_data = (void*)args.data();
+    
+    auto ret_ty = get_return_type();
+ 
+    // vec3 and stuff that is > sizeof(void*) requires special handling
+    // by preallocating the output buffer
+    if (ret_ty != nullptr && ret_ty->is_value_type() && ret_ty->get_valuetype_size() > sizeof(void*)) {
+        stack_frame.out_data = &out;
+    } else {
+        stack_frame.out_data = nullptr;
+    }
+    
+    invoke_wrapper((void*)&stack_frame, sdk::get_thread_context());
+
+    if (stack_frame.out_data != &out) {
+        out.ptr = stack_frame.out_data;
+        return out;
+    }
+
+    return out;
+}
+
 uint32_t sdk::REMethodDefinition::get_index() const {
     auto tdb = RETypeDB::get();
 
@@ -297,6 +384,12 @@ uint16_t REMethodDefinition::get_impl_flags() const {
 #else
     return this->impl_flags;
 #endif
+}
+
+bool REMethodDefinition::is_static() const {
+    const auto method_flags = this->get_flags();
+
+    return (method_flags & (uint16_t)via::clr::MethodFlag::Static) != 0;
 }
 
 uint32_t sdk::REMethodDefinition::get_num_params() const {

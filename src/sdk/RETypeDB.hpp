@@ -1,4 +1,5 @@
 #include <string_view>
+#include <vector>
 #include <cstdint>
 
 // Forward decls
@@ -12,6 +13,8 @@ class REAttributeDef;
 class REManagedObject;
 
 namespace sdk {
+struct InvokeRet;
+
 struct RETypeDefinition;
 struct RETypeImpl;
 struct REField;
@@ -21,6 +24,9 @@ struct REMethodImpl;
 struct REProperty;
 struct REPropertyImpl;
 struct REParameterDef;
+
+sdk::InvokeRet invoke_object_func(void* obj, sdk::RETypeDefinition* t, std::string_view name, const std::vector<void*>& args);
+sdk::InvokeRet invoke_object_func(::REManagedObject* obj, std::string_view name, const std::vector<void*>& args);
 
 template <typename T, typename... Args> 
 T call_object_func(void* obj, sdk::RETypeDefinition* t, std::string_view name, Args... args);
@@ -33,6 +39,9 @@ T* get_object_field(void* obj, sdk::RETypeDefinition* t, std::string_view name, 
 
 template<typename T>
 T* get_object_field(::REManagedObject* obj, std::string_view name, bool is_value_type = false);
+
+template<typename T>
+T* get_static_field(std::string_view type_name, std::string_view name, bool is_value_type = false);
 
 static void* find_native_method(sdk::RETypeDefinition* t, std::string_view method_name);
 static void* find_native_method(std::string_view type_name, std::string_view method_name);
@@ -555,11 +564,22 @@ struct REField : public sdk::REField_ {
     void* get_init_data() const;
     uint32_t get_offset_from_fieldptr() const;
     uint32_t get_offset_from_base() const;
+    bool is_static() const;
+    bool is_literal() const;
 
     void* get_data_raw(void* object = nullptr, bool is_value_type = false) const;
 
     template <typename T> T& get_data(void* object = nullptr, bool is_value_type = false) const { return *(T*)get_data_raw(object); }
 };
+
+#pragma pack(push, 1)
+struct InvokeRet {
+    union {
+        std::array<uint8_t, 128> bytes{};
+        void* ptr;
+    };
+};
+#pragma pack(pop)
 
 struct REMethodDefinition : public sdk::REMethodDefinition_ {
     sdk::RETypeDefinition* get_declaring_type() const;
@@ -572,6 +592,7 @@ struct REMethodDefinition : public sdk::REMethodDefinition_ {
     int32_t get_virtual_index() const;
     uint16_t get_flags() const;
     uint16_t get_impl_flags() const;
+    bool is_static() const;
     
     template<typename T>
     T get_function_t() const {
@@ -588,6 +609,13 @@ struct REMethodDefinition : public sdk::REMethodDefinition_ {
         return get_function_t<T (*)(Args...)>()(args...); 
     }
 
+    // calling and invoking are two different things
+    // calling is the actual call to the function
+    // invoking is calling a wrapper function that calls the function
+    // using an array of arguments
+    InvokeRet invoke(void* object, const std::vector<void*>& args) const;
+
+    uint32_t get_invoke_id() const;
     uint32_t get_num_params() const;
 
     std::vector<uint32_t> get_param_typeids() const;
@@ -631,6 +659,18 @@ T* get_object_field(::REManagedObject* obj, std::string_view name, bool is_value
     auto def = utility::re_managed_object::get_type_definition(obj);
 
     return get_object_field<T>((void*)obj, def, name, is_value_type);
+}
+
+template<typename T>
+T* get_static_field(std::string_view type_name, std::string_view name, bool is_value_type) {
+    const auto t = sdk::RETypeDB::get()->find_type(type_name);
+
+    if (t == nullptr) {
+        // spdlog::error("Cannot find type {:s}", type_name.data());
+        return nullptr;
+    }
+
+    return get_object_field<T>((void*)nullptr, t, name, is_value_type);
 }
 
 static void* find_native_method(sdk::RETypeDefinition* t, std::string_view method_name) {

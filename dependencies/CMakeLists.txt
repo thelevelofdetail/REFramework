@@ -29,4 +29,8 @@ add_library(imgui STATIC
             imgui/imgui_tables.cpp
             imgui/imgui.cpp)
 
+add_library(nlohmann_json INTERFACE)
+target_include_directories(nlohmann_json INTERFACE nlohmann/)
+
+
 target_compile_definitions(imgui PUBLIC IMGUI_USER_CONFIG="../src/re2-imgui/re2_imconfig.hpp")
