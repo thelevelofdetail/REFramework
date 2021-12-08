@@ -1,8 +1,10 @@
 #pragma once
 
+#include <vector>
+#include <deque>
 #include <unordered_set>
 #include <imgui.h>
-#include <nlohmann/json.hpp>
+#include <json.hpp>
 
 #include "utility/Address.hpp"
 #include "Tool.hpp"
@@ -119,8 +121,12 @@ public:
     std::string_view get_name() const override { return "ObjectExplorer"; };
 
     void on_draw_dev_ui() override;
+    void on_frame() override;
+    void on_lua_state_created(sol::state& lua) override;
 
 private:
+    void display_pins();
+
 #ifdef TDB_DUMP_ALLOWED
     std::shared_ptr<detail::ParsedType> init_type_min(nlohmann::json& il2cpp_dump, sdk::RETypeDB* tdb, uint32_t i);
     std::shared_ptr<detail::ParsedType> init_type(nlohmann::json& il2cpp_dump, sdk::RETypeDB* tdb, uint32_t i);
@@ -172,6 +178,29 @@ private:
         return made_node;
     }
 
+    std::string build_path() const {
+        std::string path{};
+
+        for (auto& p : m_current_path) {
+            if (!path.empty()) {
+                path += ".";
+            }
+
+            path += p;
+        }
+        
+        return path;
+    }
+
+    struct PinnedObject {
+        Address address{};
+        std::string name{};
+        std::string path{};
+    };
+
+    std::vector<PinnedObject> m_pinned_objects{};
+    std::deque<std::string> m_current_path{};
+
     inline static const ImVec4 VARIABLE_COLOR{ 100.0f / 255.0f, 149.0f / 255.0f, 237.0f / 255.0f, 255 / 255.0f };
     inline static const ImVec4 VARIABLE_COLOR_HIGHLIGHT{ 1.0f, 1.0f, 1.0f, 1.0f };
 
@@ -187,6 +216,8 @@ private:
         int64_t value;
     };
 
+    std::unordered_set<void*> m_known_stub_methods{};
+    std::unordered_set<void*> m_ok_methods{};
     std::unordered_multimap<std::string, EnumDescriptor> m_enums;
     std::unordered_map<std::string, REType*> m_types;
     std::vector<std::string> m_sorted_types;

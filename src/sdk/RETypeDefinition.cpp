@@ -254,6 +254,49 @@ sdk::RETypeDefinition* RETypeDefinition::get_parent_type() const {
     return tdb->get_type(this->parent_typeid);
 }
 
+static std::shared_mutex g_underlying_mtx{};
+static std::unordered_map<const sdk::RETypeDefinition*, sdk::RETypeDefinition*> g_underlying_types{};
+
+sdk::RETypeDefinition* RETypeDefinition::get_underlying_type() const {
+    {
+        std::shared_lock _{ g_underlying_mtx };
+
+        if (auto it = g_underlying_types.find(this); it != g_underlying_types.end()) {
+            return it->second;
+        }
+    }
+    
+    if (!this->is_enum()) {
+        return nullptr;
+    }
+
+    // get the underlying type of the enum
+    // and then hash the name of the type instead
+    static auto get_underlying_type_method = this->get_method("GetUnderlyingType");
+    const auto underlying_type = get_underlying_type_method->call<::REManagedObject*>(sdk::get_thread_context(), this->get_runtime_type());
+
+    if (underlying_type != nullptr) {
+        static auto system_runtime_type_type = sdk::RETypeDB::get()->find_type("System.RuntimeType");
+        static auto get_name_method = system_runtime_type_type->get_method("get_FullName");
+
+        const auto full_name = get_name_method->call<::REManagedObject*>(sdk::get_thread_context(), underlying_type);
+
+        if (full_name != nullptr) {
+            const auto managed_str = (SystemString*)((uintptr_t)utility::re_managed_object::get_field_ptr(full_name) - sizeof(::REManagedObject));
+            const auto str = utility::narrow(managed_str->data);
+
+            managed_str->referenceCount = 0;
+
+            auto type_definition = sdk::RETypeDB::get()->find_type(str);
+            
+            std::unique_lock _{ g_underlying_mtx };
+            g_underlying_types[this] = type_definition;
+        }
+    }
+
+    return g_underlying_types[this];
+}
+
 static std::shared_mutex g_field_mtx{};
 static std::unordered_map<std::string, sdk::REField*> g_field_map{};
 
@@ -416,6 +459,125 @@ bool RETypeDefinition::is_value_type() const {
     return get_vm_obj_type() == via::clr::VMObjType::ValType;
 }
 
+bool RETypeDefinition::is_enum() const {
+    static sdk::RETypeDefinition* enum_type = nullptr;
+
+    if (enum_type == nullptr) {
+        enum_type = RETypeDB::get()->find_type("System.Enum");
+    }
+
+    if (!this->is_value_type()) {
+        return false;
+    }
+
+    return this->is_a(enum_type);
+}
+
+static std::shared_mutex g_by_ref_mtx{};
+static std::unordered_map<const RETypeDefinition*, bool> g_by_ref_map{};
+
+bool RETypeDefinition::is_by_ref() const {
+    {
+        std::shared_lock _{g_by_ref_mtx};
+
+        if (auto it = g_by_ref_map.find(this); it != g_by_ref_map.end()) {
+            return it->second;
+        }
+    }
+
+    std::unique_lock _{g_by_ref_mtx};
+
+    auto runtime_type = this->get_runtime_type();
+
+    if (runtime_type == nullptr) {
+        g_by_ref_map[this] = true;
+        return true;
+    }
+
+    auto runtime_typedef = utility::re_managed_object::get_type_definition(runtime_type);
+
+    if (runtime_typedef == nullptr) {
+        g_by_ref_map[this] = true;
+        return true;
+    }
+
+    static auto by_ref_method = runtime_typedef->get_method("get_IsByRef");
+
+    g_by_ref_map[this] = by_ref_method->call<bool>(sdk::get_thread_context(), runtime_type);
+
+    return g_by_ref_map[this];   
+}
+
+static std::shared_mutex g_pointer_mtx{};
+static std::unordered_map<const RETypeDefinition*, bool> g_pointer_map{};
+
+bool RETypeDefinition::is_pointer() const {
+    {
+        std::shared_lock _{g_pointer_mtx};
+
+        if (auto it = g_pointer_map.find(this); it != g_pointer_map.end()) {
+            return it->second;
+        }
+    }
+
+    std::unique_lock _{g_pointer_mtx};
+
+    auto runtime_type = this->get_runtime_type();
+
+    if (runtime_type == nullptr) {
+        g_pointer_map[this] = false;
+        return false;
+    }
+
+    auto runtime_typedef = utility::re_managed_object::get_type_definition(runtime_type);
+
+    if (runtime_typedef == nullptr) {
+        g_pointer_map[this] = false;
+        return false;
+    }
+
+    static auto pointer_method = runtime_typedef->get_method("get_IsPointer");
+
+    g_pointer_map[this] = pointer_method->call<bool>(sdk::get_thread_context(), runtime_type);
+
+    return g_pointer_map[this];
+}
+
+static std::shared_mutex g_primitive_mtx{};
+static std::unordered_map<const RETypeDefinition*, bool> g_primitive_map{};
+
+bool RETypeDefinition::is_primitive() const {
+    {
+        std::shared_lock _{g_primitive_mtx};
+
+        if (auto it = g_primitive_map.find(this); it != g_primitive_map.end()) {
+            return it->second;
+        }
+    }
+
+    std::unique_lock _{g_primitive_mtx};
+
+    auto runtime_type = this->get_runtime_type();
+
+    if (runtime_type == nullptr) {
+        g_primitive_map[this] = false;
+        return false;
+    }
+
+    auto runtime_typedef = utility::re_managed_object::get_type_definition(runtime_type);
+
+    if (runtime_typedef == nullptr) {
+        g_primitive_map[this] = false;
+        return false;
+    }
+
+    static auto primitive_method = runtime_typedef->get_method("get_IsPrimitive");
+
+    g_primitive_map[this] = primitive_method->call<bool>(sdk::get_thread_context(), runtime_type);
+
+    return g_primitive_map[this];
+}
+
 uint32_t RETypeDefinition::get_crc_hash() const {
 #ifndef RE7
     const auto t = get_type();
@@ -475,6 +637,59 @@ uint32_t RETypeDefinition::get_valuetype_size() const {
 #endif
 }
 
+static std::unordered_map<const sdk::RETypeDefinition*, ::REManagedObject*> g_runtime_type_map{};
+static std::shared_mutex g_runtime_type_mtx{};
+
+::REManagedObject* RETypeDefinition::get_runtime_type() const {
+    {
+        std::shared_lock _{g_runtime_type_mtx};
+
+        if (auto it = g_runtime_type_map.find(this); it != g_runtime_type_map.end()) {
+            return it->second;
+        }
+    }
+
+    static auto appdomain_type = sdk::RETypeDB::get()->find_type("System.AppDomain");
+    static auto assembly_type = sdk::RETypeDB::get()->find_type("System.Reflection.Assembly");
+    static auto get_current_domain_func = appdomain_type->get_method("get_CurrentDomain");
+    static auto get_assemblies_func = appdomain_type->get_method("GetAssemblies");
+    static auto get_assembly_type_func = assembly_type->get_method("GetType(System.String)");
+
+    auto context = sdk::get_thread_context();
+    auto current_domain = get_current_domain_func->call<REManagedObject*>(context, nullptr);
+
+    if (current_domain == nullptr) {
+        return nullptr;
+    }
+
+    auto assemblies = get_assemblies_func->call<sdk::SystemArray*>(context, current_domain);
+
+    if (assemblies == nullptr) {
+        return nullptr;
+    }
+
+    const auto assembly_count = assemblies->size();
+    const auto managed_string = sdk::VM::create_managed_string(utility::widen(this->get_full_name()));
+
+    for (auto i = 0; i < assembly_count; ++i) {
+        auto assembly = (REManagedObject*)assemblies->get_element(i);
+
+        if (assembly == nullptr) {
+            continue;
+        }
+
+        auto type = get_assembly_type_func->call<REManagedObject*>(context, assembly, managed_string);
+
+        if (type != nullptr) {
+            std::unique_lock _{g_runtime_type_mtx};
+            g_runtime_type_map[this] = type;
+            return type;
+        }
+    }
+
+    return g_runtime_type_map[this];
+}
+
 void* RETypeDefinition::get_instance() const {
     const auto t = get_type();
 
@@ -493,5 +708,22 @@ void* RETypeDefinition::create_instance() const {
     }
 
     return utility::re_type::create_instance(t);
+}
+
+::REManagedObject* RETypeDefinition::create_instance_full() const {
+    static auto system_activator_type = sdk::RETypeDB::get()->find_type("System.Activator");
+    static auto create_instance_func = system_activator_type->get_method("CreateInstance(System.Type)");
+
+    const auto typeof = this->get_runtime_type();
+
+    if (typeof == nullptr) {
+        return nullptr;
+    }
+
+    return create_instance_func->call<REManagedObject*>(sdk::get_thread_context(), typeof);
+}
+
+bool RETypeDefinition::should_pass_by_pointer() const {
+    return !is_value_type() || (get_valuetype_size() > sizeof(void*) || (!is_primitive() && !is_enum()));
 }
 } // namespace sdk

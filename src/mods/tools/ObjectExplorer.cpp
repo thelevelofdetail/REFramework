@@ -3,13 +3,14 @@
 #include <forward_list>
 #include <deque>
 #include <algorithm>
-#include <nlohmann/json.hpp>
+#include <json.hpp>
 
 #include <windows.h>
 
 #include "utility/String.hpp"
 #include "utility/Scan.hpp"
 #include "utility/Module.hpp"
+#include "utility/Memory.hpp"
 
 #include "Genny.hpp"
 
@@ -28,7 +29,7 @@ std::unordered_map<uint32_t, std::shared_ptr<detail::ParsedMethod>> g_imethoddb{
 #endif
 
 constexpr std::string_view TYPE_INFO_NAME = "REType";
-constexpr std::string_view TYPE_DEFINITION_NAME = "REClassInfo";
+constexpr std::string_view TYPE_DEFINITION_NAME = "sdk::RETypeDefinition";
 
 std::unordered_set<std::string> g_class_set{};
 
@@ -122,6 +123,22 @@ std::array<const char*, 84> g_typecode_names{
 };
 #endif
 
+static std::unordered_map<std::string, std::string> g_valuetype_typedefs {
+    { "System.Void", "void" },
+    { "System.Char", "wchar_t" },
+    { "System.Byte", "uint8_t" },
+    { "System.SByte", "int8_t" },
+    { "System.Int16", "int16_t" },
+    { "System.UInt16", "uint16_t" },
+    { "System.Int32", "int32_t" },
+    { "System.UInt32", "uint32_t" },
+    { "System.Int64", "int64_t" },
+    { "System.UInt64", "uint64_t" },
+    { "System.Single", "float" },
+    { "System.Double", "double" },
+    { "System.Boolean", "bool" },
+};
+
 struct BitReader {
     BitReader(const void* d)
         : data{(uint8_t*)d} {}
@@ -179,7 +196,32 @@ std::vector<std::string> split(const std::string& s, const std::string& token) {
     return out;
 }
 
-genny::Class* class_from_name(genny::Namespace* g, const std::string& class_name) {
+// remove stuf like "<", ">" from typenames, replace with "_"
+// anything that would be invalid in a C++ identifier or directory name
+std::string clean_typename(std::string_view name) {
+    std::string out{};
+
+    for (auto&& c : name) {
+        if (c == '<' || c == '>' || c == ' ' || c == ',') {
+            out += '_';
+        } else {
+            out += c;
+        }
+    }
+
+    return out;
+}
+
+genny::Class* class_from_name(genny::Namespace* g, std::string class_name) {
+    class_name = clean_typename(class_name);
+
+    if (class_name.length() >= 100) {
+        // hash the rest of the string using utility::hash and std::to_string instead
+        auto class_name_piece = class_name.substr(0, 100);
+        auto class_name_hash = utility::hash(class_name.substr(100));
+        class_name = class_name_piece + std::to_string(class_name_hash);
+    }
+
     auto namespaces = split(class_name, ".");
     auto new_ns = g;
 
@@ -256,15 +298,14 @@ ObjectExplorer::ObjectExplorer()
 void ObjectExplorer::on_draw_dev_ui() {
     ImGui::SetNextTreeNodeOpen(false, ImGuiCond_::ImGuiCond_Once);
 
-    if (!ImGui::CollapsingHeader(get_name().data())) {
-        return;
-    }
-
     if (m_do_init) {
         populate_classes();
         populate_enums();
     }
 
+    if (!m_do_init && !ImGui::CollapsingHeader(get_name().data())) {
+        return;
+    }
     if (ImGui::Button("Dump SDK")) {
         generate_sdk();
     }
@@ -339,18 +380,17 @@ void ObjectExplorer::on_draw_dev_ui() {
         std::vector<uint8_t> fake_type{ 0 };
 
         for (const auto& name : m_sorted_types) {
-            fake_type.clear();
-
             auto t = get_type(name);
 
             if (t == nullptr) {
                 continue;
             }
-
-            if (t->size >= fake_type.capacity()) {
-                fake_type.reserve(t->size);
+            
+            if (t->size > fake_type.size()) {
+                fake_type.resize(t->size);
             }
 
+            memset(fake_type.data(), 0, t->size);\
             handle_type((REManagedObject*)fake_type.data(), t);
         }
     }
@@ -383,13 +423,72 @@ void ObjectExplorer::on_draw_dev_ui() {
     std::vector<uint8_t> fake_type{ 0 };
 
     for (auto t : m_displayed_types) {
-        fake_type.clear();
-        fake_type.reserve(t->size);
+        if (t->size > fake_type.size()) {
+            fake_type.resize(t->size);
+        }
         
+        memset(fake_type.data(), 0, t->size);
         handle_type((REManagedObject*)fake_type.data(), t);
     }
 
     m_do_init = false;
+}
+
+void ObjectExplorer::on_frame() {
+    if (m_pinned_objects.empty()) {
+        return;
+    }
+
+    bool open = true;
+
+    // on_frame is just going to be a way to display
+    // the pinned objects in a separate window
+
+    ImGui::SetNextWindowSize(ImVec2(200, 400), ImGuiCond_::ImGuiCond_Once);
+    if (ImGui::Begin("Pinned objects", &open)) {
+        display_pins();
+
+        ImGui::End();
+    }
+
+    if (!open) {
+        m_pinned_objects.clear();
+    }
+}
+
+void ObjectExplorer::display_pins() {
+    for (auto& pinned_obj : m_pinned_objects) {
+        const auto made_node = ImGui::TreeNode((pinned_obj.path + "." + pinned_obj.name).c_str());
+        context_menu(pinned_obj.address);
+
+        if (made_node) {
+            handle_address(pinned_obj.address);
+            ImGui::TreePop();
+        }
+    }
+}
+
+void ObjectExplorer::on_lua_state_created(sol::state& lua) {
+    // lua bindings for ObjectExplorer might sound weird,
+    // but it's actually pretty useful for displaying objects
+    // that may be found during scripting
+    lua.new_usertype<ObjectExplorer>("ObjectExplorer",
+        "handle_address", [](ObjectExplorer* e, sol::object addr) {
+            uintptr_t real_addr = 0;
+
+            if (addr.is<uintptr_t>()) {
+                real_addr = addr.as<uintptr_t>();
+            } else if (addr.is<::REManagedObject*>()) {
+                real_addr = (uintptr_t)addr.as<::REManagedObject*>();
+            } else {
+                real_addr = (uintptr_t)addr.as<void*>();
+            }
+
+            e->handle_address(real_addr);
+        }
+    );
+
+    lua["object_explorer"] = this;
 }
 
 #ifdef TDB_DUMP_ALLOWED
@@ -503,6 +602,7 @@ void ObjectExplorer::generate_sdk() {
     g->type("int16_t")->size(2);
     g->type("int32_t")->size(4);
     g->type("int64_t")->size(8);
+    g->type("wchar_t")->size(2);
     g->type("uint8_t")->size(1);
     g->type("uint16_t")->size(2);
     g->type("uint32_t")->size(4);
@@ -513,7 +613,7 @@ void ObjectExplorer::generate_sdk() {
     g->type("char")->size(1);
     g->type("int")->size(4);
     g->type("void")->size(0);
-    g->type("void*")->size(8);
+    //g->type("void*")->size(8);
 
     json il2cpp_dump{};
 
@@ -685,7 +785,7 @@ void ObjectExplorer::generate_sdk() {
         //spdlog::info("{:s}.{:s}: 0x{:x}", desc->t->type->name, name, (uintptr_t)m.function);
 
         auto& type_entry = il2cpp_dump[desc->full_name];
-        auto& method_entry = type_entry["methods"][pm->name];
+        auto& method_entry = type_entry["methods"][pm->name + std::to_string(i)];
 
         method_entry["id"] = i;
         method_entry["function"] = (std::stringstream{} << std::hex << get_original_va(m.get_function())).str();
@@ -770,8 +870,8 @@ void ObjectExplorer::generate_sdk() {
                 param_entry["flags"] = param_flags;
             }
 
-#if TDB_VER > 49
-            if (auto param_modifier = get_full_enum_value_name("via.clr.ParamModifier", flags); !param_modifier.empty()) {
+#if TDB_VER >= 69
+            if (auto param_modifier = get_full_enum_value_name("via.clr.ParamModifier", modifier); !param_modifier.empty()) {
                 param_entry["modifier"] = param_modifier;
             }
 #endif
@@ -779,13 +879,13 @@ void ObjectExplorer::generate_sdk() {
             return param_entry;
         };
 
+        const auto return_type = m.get_return_type();
+        const auto return_type_name = return_type != nullptr ? return_type->get_full_name() : "";
+
         // Parse return type
 #if TDB_VER >= 69
         method_entry["returns"] = parse_param(param_ids->returnType, true);
 #else
-        const auto return_type = m.get_return_type();
-        const auto return_type_name = return_type != nullptr ? return_type->get_full_name() : "";
-
         method_entry["returns"] = json{
             {"type", return_type_name},
             {"name", ""},
@@ -807,9 +907,141 @@ void ObjectExplorer::generate_sdk() {
 
             method_entry["params"].emplace_back(param_entry);
         }
+
+        // Generate sdkgenny methods
+        if (pm->owner != nullptr && pm->m != nullptr) {
+            auto c = class_from_name(g, pm->owner->full_name);
+
+            auto real_return_type = return_type;
+            auto real_return_type_name = return_type_name;
+
+            if (return_type != nullptr && return_type->is_enum()) {
+                const auto underlying_type = return_type->get_underlying_type();
+
+                if (underlying_type != nullptr) {
+                    real_return_type = underlying_type;
+                    real_return_type_name = underlying_type->get_full_name();
+                }
+            } 
+            
+            // get the typedef of the C# valuetype to C++
+            if (real_return_type != nullptr && real_return_type->is_value_type()) {
+                if (auto it = g_valuetype_typedefs.find(real_return_type_name); it != g_valuetype_typedefs.end()) {
+                    real_return_type_name = it->second;
+                }
+            }
+
+            auto retc = class_from_name(g, real_return_type_name != "" ? real_return_type_name : "void");
+
+            bool is_ptr = false;
+
+            if (real_return_type != nullptr && real_return_type->should_pass_by_pointer()) {
+                is_ptr = true;
+            }
+
+            std::stringstream cpp_ret_stream{};
+            retc->generate_typename_for(cpp_ret_stream, nullptr);
+
+            const auto cpp_ret_name = cpp_ret_stream.str();
+
+            genny::Function* f = nullptr;
+
+            std::stringstream os{};
+
+            //os << "auto t = get_type_definition();\n";
+            os << "static auto m = sdk::RETypeDB::get()->get_method(" << pm->m->get_index() << ");\n";
+
+            auto param_names = pm->m->get_param_names();
+            auto param_types = pm->m->get_param_types();
+
+            f = c->function(clean_typename(pm->name) + std::to_string(pm->m->get_index()));
+
+            auto ret_in_first_param = false;
+
+            if (real_return_type != nullptr && real_return_type->is_value_type() && is_ptr && retc->name() != "void") {
+                ret_in_first_param = true;
+                f = f->returns(retc);
+
+                os << cpp_ret_name << " out;\n";
+                os << "return m->call<" << cpp_ret_name << ">(&out, sdk::get_thread_context()";
+
+                if (!pm->m->is_static()) {
+                    os << ", this";
+                }
+
+                if (param_names.size() > 0){
+                    for (auto param_name : param_names) {
+                        os << ", " << param_name;
+                    }
+                }
+
+                os << ");\n";
+            } else if (is_ptr) {
+                f = f->returns(retc->ptr());
+
+                os << "return m->call<" << cpp_ret_name << "*>(sdk::get_thread_context()";
+
+                if (!pm->m->is_static()) {
+                    os << ", this";
+                }
+
+                if (param_names.size() > 0){
+                    for (auto param_name : param_names) {
+                        os << ", " << param_name;
+                    }
+                }
+
+                os << ");\n";
+            } else {
+                f = f->returns(retc);
+                os << "return m->call<" << cpp_ret_name << ">(sdk::get_thread_context()";
+
+                if (!pm->m->is_static()) {
+                    os << ", this";
+                }
+
+                if (param_names.size() > 0){
+                    for (auto param_name : param_names) {
+                        os << ", " << param_name;
+                    }
+                }
+
+                os << ");\n";
+            }
+
+            f->procedure(os.str());
+
+            // Method params
+            for (auto i = 0; i < param_types.size(); ++i) {
+                auto param_type = param_types[i];
+                auto param_name = param_names[i];
+
+                if (param_type == nullptr) {
+                    continue;
+                }
+
+                auto param_type_name = param_type->get_full_name();
+
+                if (param_type->is_enum()) {
+                    const auto underlying_type = param_type->get_underlying_type();
+
+                    if (underlying_type != nullptr) {
+                        param_type_name = underlying_type->get_full_name();
+                    }
+                }
+
+                if (param_type->should_pass_by_pointer()) {
+                    f->param(clean_typename(param_name))->type(class_from_name(g, param_type_name)->ptr());
+                } else {
+                    f->param(clean_typename(param_name))->type(class_from_name(g, param_type_name));
+                }
+            }
+        }
     }
 
     spdlog::info("FIELDS BEGIN");
+
+    auto dummy_constant = g->class_("__DummyClass__")->constant("__DummyConstant__")->type("int32_t");
 
     // Fields
     for (uint32_t i = 0; i < tdb->numFields; ++i) {
@@ -879,6 +1111,97 @@ void ObjectExplorer::generate_sdk() {
 
         // Resolve the offset to be from the base class
         pf->offset_from_base += pf->owner->t->get_fieldptr_offset();
+        genny::Constant* cs = dummy_constant;
+
+        // Use sdkgenny to generate the fields now
+        if (pf->owner != nullptr) {
+            auto c = class_from_name(g, pf->owner->full_name);
+            auto t = pf->type;
+
+            if (pf->type != nullptr && pf->type->t != nullptr) {
+                const bool is_owner_value_type = pf->owner->t->is_value_type();
+                const bool is_value_type = pf->type->t->is_value_type();
+                const bool is_enum = pf->type->t->is_enum();
+
+                auto valuetype_typedef = pf->type->full_name;
+
+                if (is_enum) {
+                    const auto underlying_type = pf->type->t->get_underlying_type();
+
+                    if (underlying_type != nullptr) {
+                        valuetype_typedef = underlying_type->get_full_name();
+                    }
+                }
+
+                // Non-statics first
+                if ((field_flags & (uint16_t)via::clr::FieldFlag::Static) == 0) {
+                    auto v = c->variable(pf->name)->offset(pf->offset_from_base);
+
+                    if (is_value_type) {
+                        if (auto it = g_valuetype_typedefs.find(valuetype_typedef); it != g_valuetype_typedefs.end()) {
+                            valuetype_typedef = it->second;
+                            v->type(g->type(valuetype_typedef));
+                        } else if (pf->type->t != pf->owner->t) {
+                            v->type(class_from_name(g, valuetype_typedef));
+                        } else {
+                            v->type(g->type("uint8_t")->array_(pf->type->t->get_size()));
+                        }
+                    } else {
+                        v->type(class_from_name(g, pf->type->full_name)->ptr());
+                    }
+                } else { // Statics
+                    genny::StaticFunction* f = nullptr;
+                    genny::Type* return_f = nullptr;
+
+                    if (is_value_type) {
+                        if (auto it = g_valuetype_typedefs.find(valuetype_typedef); it != g_valuetype_typedefs.end()) {
+                            valuetype_typedef = it->second;
+                            return_f = g->type(valuetype_typedef);
+
+                            if ((field_flags & (uint16_t)via::clr::FieldFlag::Literal) != 0) {
+                                cs = c->constant(pf->name)->type(return_f);
+                            } else {
+                                f = c->static_function(pf->name);
+                            }
+                        } else {
+                            return_f = g->type("uint8_t")->ptr();
+
+                            f = c->static_function(pf->name);
+                            f->returns(return_f);
+                        }
+                    } else {
+                        if ((field_flags & (uint16_t)via::clr::FieldFlag::Literal) != 0) {
+                            switch (utility::hash(pf->type->full_name)) {
+                            case "System.String"_fnv:
+                                return_f = g->type("char")->ptr();
+                                cs = c->constant(pf->name)->type(return_f);
+                                break;
+                            default:
+                                return_f = class_from_name(g, pf->type->full_name)->ptr();
+                                f = c->static_function(pf->name);
+                                f->returns(return_f);
+
+                                break;
+                            }
+                        }
+                        else {
+                            return_f = class_from_name(g, pf->type->full_name)->ptr();
+                            f = c->static_function(pf->name);
+                            f->returns(return_f);
+                        }
+                    }
+
+                    if (f != nullptr) {
+                        std::stringstream full_return_type_name{};
+                        return_f->generate_typename_for(full_return_type_name, nullptr);
+                        std::stringstream os{};
+                        os << "return *sdk::get_static_field<" << full_return_type_name.str() << ">(\"" << pf->owner->full_name << "\", \"" << pf->name << "\", false);";
+
+                        f->procedure(os.str());
+                    }
+                }
+            }
+        }
         
         const auto field_type_name = (pf->type != nullptr) ? pf->type->full_name : "";
 
@@ -933,42 +1256,55 @@ void ObjectExplorer::generate_sdk() {
             switch (utility::hash(full_name)) {
             case "System.Boolean"_fnv:
                 field_entry["default"] = *(bool*)init_data;
+                cs->integer(*(bool*)init_data);
                 break;
             case "System.Char"_fnv:
                 field_entry["default"] = *(wchar_t*)init_data;
+                cs->integer(*(wchar_t*)init_data);
                 break;
             case "System.Byte"_fnv:
                 field_entry["default"] = *(uint8_t*)init_data;
+                cs->integer(*(uint8_t*)init_data);
                 break;
             case "System.SByte"_fnv:
                 field_entry["default"] = *(int8_t*)init_data;
+                cs->integer(*(int8_t*)init_data);
                 break;
             case "System.UInt16"_fnv:
                 field_entry["default"] = *(uint16_t*)init_data;
+                cs->integer(*(uint16_t*)init_data);
                 break;
             case "System.Int16"_fnv:
                 field_entry["default"] = *(int16_t*)init_data;
+                cs->integer(*(int16_t*)init_data);
                 break;
             case "System.UInt32"_fnv:
                 field_entry["default"] = *(uint32_t*)init_data;
+                cs->integer(*(uint32_t*)init_data);
                 break;
             case "System.Int32"_fnv:
                 field_entry["default"] = *(int32_t*)init_data;
+                cs->integer(*(int32_t*)init_data);
                 break;
             case "System.UInt64"_fnv:
                 field_entry["default"] = *(uint64_t*)init_data;
+                cs->integer(*(uint64_t*)init_data);
                 break;
             case "System.Int64"_fnv:
                 field_entry["default"] = *(int64_t*)init_data;
+                cs->integer(*(int64_t*)init_data);
                 break;
             case "System.Single"_fnv:
                 field_entry["default"] = *(float*)init_data;
+                cs->real(*(float*)init_data);
                 break;
             case "System.Double"_fnv:
                 field_entry["default"] = *(double*)init_data;
+                cs->real(*(double*)init_data);
                 break;
             case "System.String"_fnv:
                 field_entry["default"] = (char*)init_data;
+                cs->string((char*)init_data);
                 break;
             default:
                 field_entry["default"] = "REFRAMEWORK_UNIMPLEMENTED_INIT_TYPE";
@@ -1177,13 +1513,24 @@ void ObjectExplorer::generate_sdk() {
             m->procedure(os.str());
         }
 
+        // make get_type_definition static function
+        {
+            auto m = c->static_function("get_type_definition")->returns(g->type(TYPE_DEFINITION_NAME)->ptr());
+
+            std::stringstream os{};
+            os << "static auto t = sdk::RETypeDB::get()->find_type(\"" << t->name << "\");\n";
+            os << "return t;";
+
+            m->procedure(os.str());
+        }
+
         // make get_singleton_instance static function
         if (is_singleton) {
             auto m = c->static_function("get_singleton_instance")->returns(c->ptr());
 
             std::stringstream os{};
 
-            os << "return (" << c->ptr()->get_typename() << ")utility::re_type::get_singleton_instance(get_type_info());";
+            os << "return (" << c->ptr()->usable_name() << ")utility::re_type::get_singleton_instance(get_type_info());";
 
             m->procedure(os.str());
         }
@@ -1235,7 +1582,9 @@ void ObjectExplorer::generate_sdk() {
                 }
 
                 // auto ret = descriptor->returnTypeName != nullptr ? std::string{descriptor->returnTypeName} : std::string{"undefined"};
-                std::string ret{"void"};
+
+                // reflection methods are kind of shit so ignore them for now.
+                /*std::string ret{"void"};
 
                 auto m = c->function(descriptor->name);
 
@@ -1250,7 +1599,7 @@ void ObjectExplorer::generate_sdk() {
                 }
 
                 m->param("args")->type(g->type("void**"));
-                m->procedure(os.str())->returns(g->type("std::unique_ptr<utility::re_managed_object::ParamWrapper>"));
+                m->procedure(os.str())->returns(g->type("std::unique_ptr<utility::re_managed_object::ParamWrapper>"));*/
 
 #ifdef TDB_DUMP_ALLOWED
 // BORKED RIGHT NOW
@@ -1293,7 +1642,7 @@ void ObjectExplorer::generate_sdk() {
                     continue;
                 }
 
-                genny::Function* m = nullptr;
+                /*genny::Function* m = nullptr;
 
                 std::ostringstream os{};
                 os << "// " << (variable->typeName != nullptr ? variable->typeName : "") << "\n";
@@ -1318,10 +1667,10 @@ void ObjectExplorer::generate_sdk() {
                     }
 
                     m->procedure(os.str());
-                }
+                }*/
 
                 auto dummy_type = g->namespace_("sdk")->struct_("DummyData")->size(0x100);
-                m->returns(dummy_type);
+                //m->returns(dummy_type);
 
 #ifdef TDB_DUMP_ALLOWED
                 auto field_t = g_fqntypedb[variable->typeFqn];
@@ -1389,7 +1738,12 @@ void ObjectExplorer::handle_address(Address address, int32_t offset, Address par
     }
 
     bool made_node = false;
-    auto is_game_object = utility::re_managed_object::is_a(object, "via.GameObject");
+    const auto is_game_object = utility::re_managed_object::is_a(object, "via.GameObject");
+    const auto obj_typedef = utility::re_managed_object::get_type_definition(object);
+
+    if (obj_typedef != nullptr) {
+        m_current_path.emplace_back(obj_typedef->get_name());
+    }
 
 
     if (offset != -1) {
@@ -1578,6 +1932,10 @@ void ObjectExplorer::handle_address(Address address, int32_t offset, Address par
     if (made_node && offset != -1) {
         ImGui::TreePop();
     }
+
+    if (obj_typedef != nullptr) {
+        m_current_path.pop_back();
+    }
 }
 
 void ObjectExplorer::handle_game_object(REGameObject* game_object) {
@@ -1748,21 +2106,21 @@ void ObjectExplorer::handle_type(REManagedObject* obj, REType* t) {
 }
 
 void ObjectExplorer::display_enum_value(std::string_view name, int64_t value) {
-    auto first_found = get_enum_value_name(name, (int64_t)value);
 
+    auto first_found = get_enum_value_name(name, (int64_t)value);
     if (!first_found.empty()) {
-        ImGui::Text("%i: ", value);
+        ImGui::Text("%lld: ", value);
         ImGui::SameLine();
         ImGui::TextColored(VARIABLE_COLOR, "%s", first_found.c_str());
     }
     // Assume it's a set of flags then
     else {
-        ImGui::Text("%i", value);
+        ImGui::Text("%lld", value);
 
         std::vector<std::string> names{};
 
         // Check which bits are set and have enum names
-        for (auto i = 0; i < 32; ++i) {
+        for (auto i = 0; i < 64; ++i) {
             if (auto bit = (value & ((int64_t)1 << i)); bit != 0) {
                 auto value_name = get_enum_value_name(name, bit);
 
@@ -1783,6 +2141,10 @@ void ObjectExplorer::display_enum_value(std::string_view name, int64_t value) {
 }
 
 void ObjectExplorer::display_reflection_methods(REManagedObject* obj, REType* type_info) {
+    if (type_info->fields == nullptr) {
+        return;
+    }
+
     volatile auto methods = type_info->fields->methods;
 
     if (methods == nullptr || *methods == nullptr) {
@@ -1833,9 +2195,7 @@ void ObjectExplorer::display_reflection_methods(REManagedObject* obj, REType* ty
                     ImGui::Text("Type: %s", ret.c_str());
                 }
                 else {
-                    std::vector<uint8_t> fake_object{};
-                    fake_object.reserve(t2->size);
-                    fake_object.clear();
+                    std::vector<uint8_t> fake_object(t2->size, 0);
 
                     handle_type((REManagedObject*)fake_object.data(), t2);
                 }
@@ -1926,9 +2286,7 @@ void ObjectExplorer::display_reflection_properties(REManagedObject* obj, REType*
                             ImGui::Text("Type: %s", variable->typeName);
                         }
                         else {
-                            std::vector<uint8_t> fake_object{};
-                            fake_object.reserve(t2->size);
-                            fake_object.clear();
+                            std::vector<uint8_t> fake_object(t2->size, 0);
 
                             handle_type((REManagedObject*)fake_object.data(), t2);
                         }
@@ -1984,25 +2342,14 @@ void ObjectExplorer::display_native_fields(REManagedObject* obj, sdk::RETypeDefi
             const auto field_type_name = field_type->get_full_name();
             const auto field_name = f->get_name();
             const auto fieldptr_offset = f->get_offset_from_fieldptr();
-            const auto is_valuetype = field_type->get_vm_obj_type() == via::clr::VMObjType::ValType;
-
-            auto offset = fieldptr_offset;
-
-            void* data = nullptr;
-
-            bool is_enum = false;
+            const auto is_valuetype = field_type->is_value_type();
+            const auto is_enum = field_type->is_enum();
             bool is_managed_str = false;
 
+            auto offset = fieldptr_offset;
+            void* data = nullptr;
+
             std::string final_type_name = field_type_name;
-
-            // Check the field type's parent
-            if (auto fpt = field_type->get_parent_type(); fpt != nullptr) {
-                const auto full_name_hash = utility::hash(fpt->get_full_name());
-
-                if (full_name_hash == "System.Enum"_fnv) {
-                    is_enum = true;
-                }
-            }
 
             std::vector<std::string> postfixes{};
 
@@ -2133,6 +2480,25 @@ void ObjectExplorer::display_native_methods(REManagedObject* obj, sdk::RETypeDef
                 make_same_line_text(method_prototype, VARIABLE_COLOR);
             }
 
+            bool is_stub = m_known_stub_methods.find(method_ptr) != m_known_stub_methods.end();
+            bool is_ok_method = m_ok_methods.find(method_ptr) != m_ok_methods.end();
+
+            if (method_ptr != nullptr && !is_stub && !is_ok_method) {
+                if (utility::is_stub_code((uint8_t*)method_ptr)) {
+                    m_known_stub_methods.insert(method_ptr);
+
+                    is_ok_method = false;
+                    is_stub = true;
+                } else {
+                    m_ok_methods.insert(method_ptr);
+                }
+            }
+            
+            if (method_ptr == nullptr || is_stub) {
+                ImGui::SameLine();
+                ImGui::TextColored(ImVec4{ 1.0f, 0.0f, 0.0f, 1.0f }, "STUB");
+            }
+
             // draw the method data
             if (made_node) {
                 if (ImGui::BeginTable("##method", 4,  ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable)) {
@@ -2180,7 +2546,19 @@ void ObjectExplorer::display_native_methods(REManagedObject* obj, sdk::RETypeDef
                             ImGui::TableNextColumn();
                             ImGui::Text(std::to_string(i).c_str());
                             ImGui::TableNextColumn();
-                            ImGui::Text(method_param_types[i]->get_full_name().c_str());
+
+                            const auto param_typedef = method_param_types[i];
+                            const auto param_type_full_name = param_typedef->get_full_name();
+                            const auto param_type = param_typedef->get_type();
+
+                            if (param_type != nullptr) {
+                                std::vector<uint8_t> fake_object(param_typedef->get_size(), 0);
+
+                                this->handle_type((REManagedObject*)fake_object.data(), param_typedef->get_type());
+                            } else {
+                                ImGui::Text(param_type_full_name.c_str());
+                            }
+
                             ImGui::TableNextColumn();
                             ImGui::TextColored(VARIABLE_COLOR, method_param_names[i]);
                         }
@@ -2481,13 +2859,54 @@ void ObjectExplorer::display_data(void* data, void* real_data, std::string type_
     } break;
     default: {
         if (is_enum) {
-            auto value = *(int32_t*)data;
-            display_enum_value(type_name, (int64_t)value);
+            if (override_def != nullptr) {
+                switch (override_def->get_underlying_type()->get_valuetype_size()) {
+                    case 1:
+                        display_enum_value(type_name, *(int8_t*)data);
+                        if (real_data != nullptr) {
+                            auto& int_val = *(int16_t*)real_data;
 
-            if (real_data != nullptr) {
-                auto& int_val = *(int32_t*)real_data;
+                            ImGui::DragScalar("Set Value", ImGuiDataType_S8, &int_val, 1.0f, &min_i8, &max_i8);
+                        }
+                        break;
+                    case 2:
+                        display_enum_value(type_name, *(int16_t*)data);
+                        if (real_data != nullptr) {
+                            auto& int_val = *(int16_t*)real_data;
 
-                ImGui::DragInt("Set Value", (int*)&int_val, 1.0f, min_int, max_int);
+                            ImGui::DragScalar("Set Value", ImGuiDataType_S16, &int_val, 1.0f, &min_i16, &max_i16);
+                        }
+                        break;
+                    case 4:
+                        display_enum_value(type_name, *(int32_t*)data);
+                        if (real_data != nullptr) {
+                            auto& int_val = *(int32_t*)real_data;
+
+                            ImGui::DragInt("Set Value", (int*)&int_val, 1.0f, min_int, max_int);
+                        }
+                        break;
+                    case 8:
+                        display_enum_value(type_name, *(int64_t*)data);
+                        if (real_data != nullptr) {
+                            auto& int_val = *(int64_t*)real_data;
+
+                            ImGui::DragScalar("Set Value", ImGuiDataType_S64, &int_val, 1.0f, &min_int64, &max_int64);
+                        }
+                        break;
+                    default:
+                        ImGui::Text("Invalid enum size, falling back to int32");
+
+                        display_enum_value(type_name, *(int32_t*)data);
+                        if (real_data != nullptr) {
+                            auto& int_val = *(int32_t*)real_data;
+
+                            ImGui::DragInt("Set Value", (int*)&int_val, 1.0f, min_int, max_int);
+                        }
+                        break;
+                }
+            } else {
+                auto value = *(int32_t*)data;
+                display_enum_value(type_name, (int32_t)value);
             }
         } else {
             make_tree_addr(data);
@@ -2640,8 +3059,7 @@ int32_t ObjectExplorer::get_field_offset(REManagedObject* obj, VariableDescripto
 
     // Copy the object so we don't cause a crash by replacing
     // data that's being used by the game
-    std::vector<uint8_t> object_copy{};
-    object_copy.reserve(class_size);
+    std::vector<uint8_t> object_copy(class_size);
     memcpy(object_copy.data(), obj, class_size);
 
     auto first_time = std::chrono::high_resolution_clock::now();
@@ -2721,6 +3139,23 @@ void ObjectExplorer::context_menu(void* address) {
             ss << std::hex << (uintptr_t)address;
 
             ImGui::SetClipboardText(ss.str().c_str());
+        }
+
+        if (auto it = std::find_if(m_pinned_objects.begin(), m_pinned_objects.end(), [address](auto& pinned_obj) { return pinned_obj.address == address; }); it != m_pinned_objects.end()) {
+            if (ImGui::Selectable("Unpin")) {
+                m_pinned_objects.erase(it);
+            }
+        } else {
+            if (ImGui::Selectable("Pin")) {
+                auto& pinned = m_pinned_objects.emplace_back();
+
+                const auto is_managed_object = utility::re_managed_object::is_managed_object(address);
+                const auto type_definition = is_managed_object ? utility::re_managed_object::get_type_definition((REManagedObject*)address) : nullptr;
+
+                pinned.address = address;
+                pinned.name = type_definition != nullptr ? type_definition->get_name() : std::to_string((uintptr_t)address);
+                pinned.path = build_path();
+            }
         }
 
         // Log component hierarchy to disk
@@ -2913,7 +3348,7 @@ std::string ObjectExplorer::get_full_enum_value_name(std::string_view enum_name,
     std::string out{};
 
     // Check which bits are set and have enum names
-    for (auto i = 0; i < 32; ++i) {
+    for (auto i = 0; i < 64; ++i) {
         if (auto bit = (value & ((int64_t)1 << i)); bit != 0) {
             auto value_name = get_enum_value_name(enum_name, bit);
 

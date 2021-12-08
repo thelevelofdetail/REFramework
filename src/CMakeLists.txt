@@ -1,5 +1,3 @@
-project(${GAME_NAME})
-
 set(HOOKS_SRC
     DInputHook.hpp
     DInputHook.cpp
@@ -15,6 +13,8 @@ set(HOOKS_SRC
 )
 
 set(MODS_SRC
+    mods/APIProxy.hpp
+    mods/APIProxy.cpp
     mods/Camera.hpp
     mods/Camera.cpp
     mods/FirstPerson.hpp
@@ -27,6 +27,8 @@ set(MODS_SRC
     mods/ManualFlashlight.cpp
     mods/Scene.hpp
     mods/Scene.cpp
+    mods/ScriptRunner.hpp
+    mods/ScriptRunner.cpp
 
     mods/DeveloperTools.hpp
     mods/DeveloperTools.cpp
@@ -45,6 +47,8 @@ set(SDK_SRC
     sdk/ReClass_Internal_DMC5.hpp
     sdk/Enums_Internal.hpp
 
+    sdk/Application.hpp
+    sdk/Application.cpp
     sdk/REArray.hpp
     sdk/REComponent.hpp
     sdk/REContext.hpp
@@ -69,6 +73,11 @@ set(SDK_SRC
     sdk/RopewaySweetLightManager.hpp
     sdk/SceneManager.hpp
     sdk/SceneManager.cpp
+    sdk/SystemArray.hpp
+    sdk/SystemArray.cpp
+
+    sdk/helpers/NativeObject.hpp
+    sdk/helpers/NativeObject.cpp
 )
 
 set(RE2IMGUI_SRC
@@ -96,13 +105,20 @@ set(UTILITY_SRC
     utility/Patch.cpp
     utility/Pattern.hpp
     utility/Pattern.cpp
+    utility/PointerHook.hpp
+    utility/PointerHook.cpp
     utility/Scan.hpp
     utility/Scan.cpp
     utility/String.hpp
     utility/String.cpp
+    utility/Thread.hpp
+    utility/Thread.cpp
 )
 
 set(FRAMEWORK_SRC
+    ../include/API.h
+    ../include/API.hpp
+    API.cpp
     Mod.hpp
     Tool.hpp
     Mods.hpp
@@ -111,12 +127,20 @@ set(FRAMEWORK_SRC
     REFramework.cpp
 )
 
+set(BINDINGS_SRC
+    mods/bindings/Sdk.cpp
+    mods/bindings/Sdk.hpp
+    mods/bindings/ImGui.cpp
+    mods/bindings/ImGui.hpp
+)
+
 source_group("re2-imgui" FILES ${RE2IMGUI_SRC})
 source_group("Hooks" FILES ${HOOKS_SRC})
 source_group("Mods" FILES ${MODS_SRC})
 source_group("SDK" FILES ${SDK_SRC})
 source_group("Utility" FILES ${UTILITY_SRC})
 source_group("Framework" FILES ${FRAMEWORK_SRC})
+source_group("Bindings" FILES ${BINDINGS_SRC})
 
 add_library(${GAME_NAME} SHARED
             Main.cpp
@@ -127,10 +151,11 @@ add_library(${GAME_NAME} SHARED
             ${RE2IMGUI_SRC}
             ${UTILITY_SRC}
             ${FRAMEWORK_SRC}
+            ${BINDINGS_SRC}
 )
 
-target_link_libraries(${GAME_NAME} PUBLIC imgui minhook d3d11 glm_static shlwapi)
-target_compile_options(${GAME_NAME} PUBLIC /GS-)
+target_link_libraries(${GAME_NAME} PUBLIC xbyak nlohmann_json spdlog lua sol2 imgui minhook d3d11 glm_static shlwapi)
+target_compile_options(${GAME_NAME} PUBLIC /GS- /bigobj)
 target_compile_features(${GAME_NAME} PUBLIC cxx_std_20)
 
 include_directories(${GAME_NAME} ${CMAKE_CURRENT_SOURCE_DIR})
@@ -171,3 +196,5 @@ endif()
 if (BAREBONES)
     target_compile_definitions(${GAME_NAME} PUBLIC BAREBONES)
 endif()
+
+target_compile_definitions(${GAME_NAME} PUBLIC REFRAMEWORK_EXPORTS)

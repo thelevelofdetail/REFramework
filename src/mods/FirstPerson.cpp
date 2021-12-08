@@ -1,7 +1,7 @@
 #include <unordered_set>
 
 #include <spdlog/spdlog.h>
-#include <imgui/imgui.h>
+#include <imgui.h>
 
 #include "utility/Scan.hpp"
 #include "REFramework.hpp"
@@ -9,7 +9,7 @@
 
 #include "FirstPerson.hpp"
 
-#ifndef DMC5
+#if defined(RE2) || defined(RE3)
 
 FirstPerson* g_first_person = nullptr;
 

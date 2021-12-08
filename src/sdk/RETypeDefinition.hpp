@@ -291,6 +291,7 @@ struct RETypeDefinition : public sdk::RETypeDefinition_ {
 
     sdk::RETypeDefinition* get_declaring_type() const;
     sdk::RETypeDefinition* get_parent_type() const;
+    sdk::RETypeDefinition* get_underlying_type() const;
     sdk::REField* get_field(std::string_view name) const;
     sdk::REMethodDefinition* get_method(std::string_view name) const;
     std::vector<sdk::REMethodDefinition*> get_methods(std::string_view name) const;
@@ -303,14 +304,22 @@ struct RETypeDefinition : public sdk::RETypeDefinition_ {
 
     via::clr::VMObjType get_vm_obj_type() const;
     bool is_value_type() const;
+    bool is_enum() const;
+    bool is_by_ref() const;
+    bool is_pointer() const;
+    bool is_primitive() const;
+
+    bool should_pass_by_pointer() const;
 
     uint32_t get_crc_hash() const;
     uint32_t get_fqn_hash() const;
     uint32_t get_size() const;
     uint32_t get_valuetype_size() const;
     ::REType* get_type() const;
+    ::REManagedObject* get_runtime_type() const;
 
     void* get_instance() const;
     void* create_instance() const;
+    ::REManagedObject* create_instance_full() const;
 };
 } // namespace sdk

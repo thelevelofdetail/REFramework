@@ -1,7 +1,7 @@
 #pragma once
 
-#include <cstdint>
 #include <array>
+#include <cstdint>
 
 #include "RENativeArray.hpp"
 
@@ -114,7 +114,7 @@ public:
 #ifdef RE7
         return (uint16_t)typekind_sizes[code];
 #else
-        return depth;
+        return size;
 #endif
     }
 
@@ -141,7 +141,7 @@ public:
         }
 
         // this is wack af good thing its only in re7
-        return prop->getter_array == nullptr && prop->getter_array2 == nullptr;
+        return prop->getter_array != nullptr || prop->getter_array2 != nullptr;
 #else
         return is_array_;
 #endif

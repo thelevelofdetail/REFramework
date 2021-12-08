@@ -1,6 +1,10 @@
 #pragma once
 
+#include <array>
+#include <unordered_set>
+
 #include <spdlog/spdlog.h>
+#include <imgui.h>
 
 class Mods;
 class REGlobals;
@@ -13,6 +17,9 @@ class RETypes;
 
 // Global facilitator
 class REFramework {
+private:
+    void hook_monitor();
+
 public:
     REFramework();
     virtual ~REFramework();
@@ -34,7 +41,7 @@ public:
 
     Address get_module() const { return m_game_module; }
 
-    bool is_ready() const { return m_game_data_initialized; }
+    bool is_ready() const { return m_initialized && m_game_data_initialized; }
 
     void on_frame_d3d11();
     void on_post_present_d3d11();
@@ -55,6 +62,40 @@ public:
     auto& get_d3d11_hook() const { return m_d3d11_hook; }
     auto& get_d3d12_hook() const { return m_d3d12_hook; }
 
+    auto get_window() const { return m_wnd; }
+    auto get_last_window_pos() const { return m_last_window_pos; } // REFramework imgui window
+    auto get_last_window_size() const { return m_last_window_size; } // REFramework imgui window
+
+    static const char* get_game_name() {
+    #if defined(RE2)
+        return "re2";
+    #elif defined(RE3)
+        return "re3";
+    #elif defined(RE7)
+        return "re7";
+    #elif defined(RE8)
+        return "re8";
+    #elif defined(DMC5)
+        return "dmc5";
+    #elif defined(MHRISE)
+        return "mhrise";
+    #else
+        return "unknown";
+    #endif
+    }
+
+    bool is_drawing_ui() const {
+        return m_draw_ui;
+    }
+
+    void set_draw_ui(bool state) {
+        m_draw_ui = state;
+    }
+
+    auto& get_hook_monitor_mutex() {
+        return m_hook_monitor_mutex;
+    }
+
 private:
     void consume_input();
 
@@ -65,6 +106,9 @@ private:
     bool hook_d3d12();
 
     bool initialize();
+    bool initialize_windows_message_hook();
+
+    void call_on_frame();
 
     bool m_first_frame{true};
     bool m_is_d3d12{false};
@@ -83,6 +127,8 @@ private:
     bool m_ui_option_transparent{true};
     bool m_ui_passthrough{false};
     
+    ImVec2 m_last_window_pos{};
+    ImVec2 m_last_window_size{};
 
     std::mutex m_input_mutex{};
 
@@ -106,7 +152,22 @@ private:
     std::unique_ptr<REGlobals> m_globals;
     std::unique_ptr<RETypes> m_types;
 
+    std::recursive_mutex m_hook_monitor_mutex{};
+    std::unique_ptr<std::thread> m_d3d_monitor_thread{};
+    std::chrono::steady_clock::time_point m_last_present_time{};
+    std::chrono::steady_clock::time_point m_last_message_time{};
+    std::chrono::steady_clock::time_point m_last_sendmessage_time{};
+    std::chrono::steady_clock::time_point m_last_chance_time{};
+    uint32_t m_frames_since_init{0};
+    bool m_has_last_chance{true};
+    bool m_first_initialize{true};
+
+    bool m_sent_message{false};
+    bool m_message_hook_requested{false};
+
     RendererType m_renderer_type{RendererType::D3D11};
+
+    template <typename T> using ComPtr = Microsoft::WRL::ComPtr<T>;
 
 private: // D3D misc
     void set_imgui_style() noexcept;
@@ -124,24 +185,56 @@ private: // D3D12 Init
     void create_render_target_d3d12();
 
 private: // D3D11 members
-    ID3D11RenderTargetView* m_main_render_target_view_d3d11{nullptr};
+    struct D3D11 {
+        ComPtr<ID3D11Texture2D> blank_rt{};
+		ComPtr<ID3D11Texture2D> rt{};
+        ComPtr<ID3D11RenderTargetView> blank_rt_rtv{};
+		ComPtr<ID3D11RenderTargetView> rt_rtv{};
+		ComPtr<ID3D11ShaderResourceView> rt_srv{};
+        uint32_t rt_width{};
+        uint32_t rt_height{};
+		ComPtr<ID3D11RenderTargetView> bb_rtv{};
+    } m_d3d11{};
+
+public:
+    auto& get_blank_rendertarget_d3d11() { return m_d3d11.blank_rt; }
+    auto& get_rendertarget_d3d11() { return m_d3d11.rt; }
+    auto get_rendertarget_width_d3d11() const { return m_d3d11.rt_width; }
+    auto get_rendertarget_height_d3d11() const { return m_d3d11.rt_height; }
 
 private: // D3D12 members
-    struct FrameContextD3D12 {
-        ID3D12CommandAllocator* command_allocator;
-        UINT64 fence_value;
-    };
+    struct D3D12 {
+        struct FrameContext {
+            ID3D12CommandAllocator* command_allocator{};
+            UINT64 fence_value{};
+        };
 
-    static constexpr int s_NUM_FRAMES_IN_FLIGHT_D3D12{3};
-    static constexpr int s_NUM_BACK_BUFFERS_D3D12{3};
+        static constexpr int s_NUM_FRAMES_IN_FLIGHT_D3D12{4};
+        static constexpr int s_NUM_BACK_BUFFERS_D3D12{4};
 
-    FrameContextD3D12 m_frame_context_d3d12[s_NUM_FRAMES_IN_FLIGHT_D3D12]{};
-    ID3D12DescriptorHeap* m_pd3d_rtv_desc_heap_d3d12{nullptr};
-    ID3D12DescriptorHeap* m_pd3d_srv_desc_heap_d3d12{nullptr};
-    ID3D12CommandQueue* m_pd3d_command_queue_d3d12{nullptr};
-    ID3D12GraphicsCommandList* m_pd3d_command_list_d3d12{nullptr};
-    ID3D12Resource* m_main_render_target_resource_d3d12[s_NUM_BACK_BUFFERS_D3D12]{nullptr};
-    D3D12_CPU_DESCRIPTOR_HANDLE m_main_render_target_descriptor_d3d12[s_NUM_BACK_BUFFERS_D3D12]{};
+        FrameContext frame_context[4]{};
+        ID3D12DescriptorHeap* rtv_desc_heap{nullptr};
+        ID3D12DescriptorHeap* srv_desc_heap{nullptr};
+        ID3D12CommandQueue* command_queue{nullptr};
+        ID3D12GraphicsCommandList* command_list{nullptr};
+        ID3D12Resource* rt_resources[4]{nullptr};
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu_rtvs[4]{};
+        D3D12_CPU_DESCRIPTOR_HANDLE cpu_srvs[4]{};
+        D3D12_GPU_DESCRIPTOR_HANDLE gpu_srvs[4]{};
+
+        ComPtr<ID3D12Resource> blank_rt{};
+        ComPtr<ID3D12Resource> rt{};
+        uint32_t rt_width{};
+        uint32_t rt_height{};
+    } m_d3d12{};
+
+public:
+    auto& get_blank_rendertarget_d3d12() { return m_d3d12.blank_rt; }
+    auto& get_rendertarget_d3d12() { return m_d3d12.rt; }
+    auto get_rendertarget_width_d3d12() { return m_d3d12.rt_width; }
+    auto get_rendertarget_height_d3d12() { return m_d3d12.rt_height; }
+
+private:
 };
 
 extern std::unique_ptr<REFramework> g_framework;

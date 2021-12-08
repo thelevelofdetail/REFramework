@@ -1,8 +1,9 @@
+#include <chrono>
 #include <filesystem>
 
 #include <spdlog/sinks/basic_file_sink.h>
 
-#include <imgui/imgui.h>
+#include <imgui.h>
 #include "re2-imgui/font_robotomedium.hpp"
 #include "re2-imgui/imgui_impl_dx11.h"
 #include "re2-imgui/imgui_impl_dx12.h"
@@ -19,8 +20,92 @@
 #include "REFramework.hpp"
 
 namespace fs = std::filesystem;
+using namespace std::literals;
+
 
 std::unique_ptr<REFramework> g_framework{};
+
+void REFramework::hook_monitor() {
+    std::scoped_lock _{ m_hook_monitor_mutex };
+
+    if (g_framework == nullptr) {
+        return;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+
+    auto& d3d11 = get_d3d11_hook();
+    auto& d3d12 = get_d3d12_hook();
+
+    const auto renderer_type = get_renderer_type();
+
+    if (d3d11 == nullptr || d3d12 == nullptr 
+        || (renderer_type == REFramework::D3D11 && d3d11 != nullptr && !d3d11->is_inside_present()) 
+        || (renderer_type == REFramework::D3D12 && d3d12 != nullptr && !d3d12->is_inside_present())) 
+    {
+        // check if present time is more than 5 seconds ago
+        if (now - m_last_present_time > std::chrono::seconds(5)) {
+            if (m_has_last_chance) {
+                // the purpose of this is to make sure that the game is not frozen
+                // e.g. if we are debugging the game, so we don't rehook anything on accident
+                m_has_last_chance = false;
+                m_last_chance_time = now;
+
+                spdlog::info("Last chance encountered for hooking");
+            }
+
+            if (!m_has_last_chance && now - m_last_chance_time > std::chrono::seconds(1)) {
+                spdlog::info("Sending rehook request for D3D");
+
+                m_is_d3d11 = false;
+
+                if (hook_d3d12()) {
+                    
+                }
+
+                // so we don't immediately go and hook it again
+                // add some additional time to it to give it some leeway
+                m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_message_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_chance_time = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                m_has_last_chance = true;
+            }
+        } else {
+            m_last_chance_time = std::chrono::steady_clock::now();
+            m_has_last_chance = true;
+        }
+
+        if (m_initialized && m_wnd != 0 && now - m_last_message_time > std::chrono::seconds(5)) {
+            // send dummy message to window to check if our hook is still intact
+            if (!m_sent_message) {
+                spdlog::info("Sending initial message hook test");
+
+                auto proc = (WNDPROC)GetWindowLongPtr(m_wnd, GWLP_WNDPROC);
+
+                if (proc != nullptr) {
+                    const auto ret = CallWindowProc(proc, m_wnd, WM_NULL, 0, 0);
+
+                    spdlog::info("Hook test message sent");
+                }
+
+                m_last_sendmessage_time = std::chrono::steady_clock::now();
+                m_sent_message = true;
+            } else if (now - m_last_sendmessage_time > std::chrono::seconds(1)) {
+                spdlog::info("Sending reinitialization request for message hook");
+
+                // if we don't get a message for 5 seconds, assume the hook is broken
+                //m_initialized = false; // causes the hook to be re-initialized next frame
+                m_message_hook_requested = true;
+                m_last_message_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                m_last_present_time = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+
+                m_sent_message = false;
+            }
+        } else {
+            m_sent_message = false;
+        }
+    }
+}
 
 REFramework::REFramework()
     : m_game_module{GetModuleHandle(0)}
@@ -81,9 +166,15 @@ REFramework::REFramework()
 
     // Fixes a crash on some machines when starting the game
 #if defined(RE8) || defined(MHRISE)
+    auto now = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point next_log = now;
+
     // wait for the game to load (WTF MHRISE??)
     while (LoadLibraryA("d3d12.dll") == nullptr) {
-        spdlog::info("Waiting");
+        if (now >= next_log) {
+            spdlog::info("[REFramework] Waiting for D3D12...");
+            next_log = now + 1s;
+        }
     }
 
     // auto startup_patch_addr = Address{m_game_module}.get(0x3E69E50);
@@ -102,16 +193,31 @@ REFramework::REFramework()
 
     // Hooking D3D12 initially because we need to retrieve the command queue before the first frame then switch to D3D11 if it failed later
     // on
-    if (!hook_d3d12()) {
+    // addendum: now we don't need to do that, we just grab the command queue offset from the swapchain we create
+    /*if (!hook_d3d12()) {
         spdlog::error("Failed to hook D3D12 for initial test.");
-    }
+    }*/
+
+    std::scoped_lock _{m_hook_monitor_mutex};
+
+    m_last_present_time = std::chrono::steady_clock::now();
+    m_last_message_time = std::chrono::steady_clock::now();
+    m_d3d_monitor_thread = std::make_unique<std::thread>([this]() {
+        while (true) {
+            this->hook_monitor();
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    });
 }
 
 bool REFramework::hook_d3d11() {
-    m_d3d11_hook = std::make_unique<D3D11Hook>();
-    m_d3d11_hook->on_present([this](D3D11Hook& hook) { on_frame_d3d11(); });
-    m_d3d11_hook->on_post_present([this](D3D11Hook& hook) { on_post_present_d3d11(); });
-    m_d3d11_hook->on_resize_buffers([this](D3D11Hook& hook) { on_reset(); });
+    //if (m_d3d11_hook == nullptr) {
+        m_d3d11_hook.reset();
+        m_d3d11_hook = std::make_unique<D3D11Hook>();
+        m_d3d11_hook->on_present([this](D3D11Hook& hook) { on_frame_d3d11(); });
+        m_d3d11_hook->on_post_present([this](D3D11Hook& hook) { on_post_present_d3d11(); });
+        m_d3d11_hook->on_resize_buffers([this](D3D11Hook& hook) { on_reset(); });
+    //}
 
     // Making sure D3D12 is not hooked
     if (!m_is_d3d12) {
@@ -146,12 +252,15 @@ bool REFramework::hook_d3d12() {
         return hook_d3d11();
     }
 
-    m_d3d12_hook = std::make_unique<D3D12Hook>();
-    m_d3d12_hook->on_present([this](D3D12Hook& hook) { on_frame_d3d12(); });
-    m_d3d12_hook->on_post_present([this](D3D12Hook& hook) { on_post_present_d3d12(); });
-    m_d3d12_hook->on_resize_buffers([this](D3D12Hook& hook) { on_reset(); });
-    m_d3d12_hook->on_resize_target([this](D3D12Hook& hook) { on_reset(); });
-    m_d3d12_hook->on_create_swap_chain([this](D3D12Hook& hook) { m_pd3d_command_queue_d3d12 = m_d3d12_hook->get_command_queue(); });
+    //if (m_d3d12_hook == nullptr) {
+        m_d3d12_hook.reset();
+        m_d3d12_hook = std::make_unique<D3D12Hook>();
+        m_d3d12_hook->on_present([this](D3D12Hook& hook) { on_frame_d3d12(); });
+        m_d3d12_hook->on_post_present([this](D3D12Hook& hook) { on_post_present_d3d12(); });
+        m_d3d12_hook->on_resize_buffers([this](D3D12Hook& hook) { on_reset(); });
+        m_d3d12_hook->on_resize_target([this](D3D12Hook& hook) { on_reset(); });
+    //}
+    //m_d3d12_hook->on_create_swap_chain([this](D3D12Hook& hook) { m_d3d12.command_queue = m_d3d12_hook->get_command_queue(); });
 
     // Making sure D3D11 is not hooked
     if (!m_is_d3d11) {
@@ -210,24 +319,35 @@ void REFramework::on_frame_d3d11() {
     }
 
     m_renderer_type = RendererType::D3D11;
+    
+    if (m_message_hook_requested) {
+        initialize_windows_message_hook();
+    }
 
-    consume_input();
+    const bool is_init_ok = m_error.empty() && m_game_data_initialized;
 
-    ImGui_ImplDX11_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
-
-    if (m_error.empty() && m_game_data_initialized) {
+    if (is_init_ok) {
         // Write default config once if it doesn't exist.
         if (!std::exchange(m_created_default_cfg, true)) {
             if (!fs::exists({utility::widen("re2_fw_config.txt")})) {
                 save_config();
             }
         }
-
-        // Run mod frame callbacks.
-        m_mods->on_frame();
     }
+
+    consume_input();
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+
+    if (is_init_ok) {
+        // Run mod frame callbacks.
+        m_mods->on_pre_imgui_frame();
+    }
+
+    ImGui::NewFrame();
+
+    call_on_frame();
 
     draw_ui();
     m_last_draw_ui = m_draw_ui;
@@ -235,31 +355,71 @@ void REFramework::on_frame_d3d11() {
     ImGui::EndFrame();
     ImGui::Render();
 
-    ID3D11DeviceContext* context = nullptr;
-    m_d3d11_hook->get_device()->GetImmediateContext(&context);
+    ComPtr<ID3D11DeviceContext> context{};
+    float clear_color[]{0.0f, 0.0f, 0.0f, 0.0f};
 
-    context->OMSetRenderTargets(1, &m_main_render_target_view_d3d11, NULL);
+    m_d3d11_hook->get_device()->GetImmediateContext(&context);
+    context->ClearRenderTargetView(m_d3d11.blank_rt_rtv.Get(), clear_color);
+    context->ClearRenderTargetView(m_d3d11.rt_rtv.Get(), clear_color);
+    context->OMSetRenderTargets(1, m_d3d11.rt_rtv.GetAddressOf(), NULL);
+    //context->OMSetRenderTargets(1, m_d3d11.bb_rtv.GetAddressOf(), NULL);
 
     ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 
-    if (m_error.empty() && m_game_data_initialized) {
+    // Set the back buffer to be the render target.
+    context->OMSetRenderTargets(1, m_d3d11.bb_rtv.GetAddressOf(), nullptr);
+
+    // Setup a draw list to draw our render target to the back buffer.
+    static ImDrawList dl{ImGui::GetDrawListSharedData()};
+    static ImDrawData dd{};
+    static ImDrawList* dls[]{&dl};
+    auto w = (float)m_d3d11.rt_width;
+    auto h = (float)m_d3d11.rt_height;
+
+    dl._ResetForNewFrame();
+    dl.PushClipRect(ImVec2{0.0f, 0.0f}, ImVec2{w, h});
+    dl.AddImage((ImTextureID)m_d3d11.rt_srv.Get(), ImVec2{0.0f, 0.0f}, ImVec2{w, h});
+    dl.PopClipRect();
+
+    dd.Valid = true;
+    dd.CmdLists = dls;
+    dd.CmdListsCount = 1;
+    dd.TotalVtxCount = dl.VtxBuffer.Size;
+    dd.TotalIdxCount = dl.IdxBuffer.Size;
+    dd.DisplayPos = ImVec2{0.0f, 0.0f};
+    dd.DisplaySize = ImGui::GetIO().DisplaySize;
+    dd.FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+
+    ImGui_ImplDX11_RenderDrawData(&dd);
+
+    if (is_init_ok) {
         m_mods->on_post_frame();
     }
 }
 
 void REFramework::on_post_present_d3d11() {
     if (!m_error.empty() || !m_initialized || !m_game_data_initialized) {
+        if (m_last_present_time <= std::chrono::steady_clock::now()){
+            m_last_present_time = std::chrono::steady_clock::now();
+        }
+
         return;
     }
 
     for (auto& mod : m_mods->get_mods()) {
         mod->on_post_present();
     }
+
+    if (m_last_present_time <= std::chrono::steady_clock::now()){
+        m_last_present_time = std::chrono::steady_clock::now();
+    }
 }
 
 // D3D12 Draw funciton
 void REFramework::on_frame_d3d12() {
-    spdlog::debug("on_frame (D3D12)");
+    m_d3d12.command_queue = m_d3d12_hook->get_command_queue();
+
+    //spdlog::debug("on_frame (D3D12)");
     
     if (!m_initialized) {
         if (!initialize()) {
@@ -272,30 +432,41 @@ void REFramework::on_frame_d3d12() {
         return;
     }
 
-    if (m_pd3d_command_queue_d3d12 == nullptr) {
+    if (m_d3d12.command_queue == nullptr) {
         spdlog::error("Null Command Queue");
         return;
     }
 
     m_renderer_type = RendererType::D3D12;
 
-    consume_input();
+    if (m_message_hook_requested) {
+        initialize_windows_message_hook();
+    }
 
-    ImGui_ImplDX12_NewFrame();
-    ImGui_ImplWin32_NewFrame();
-    ImGui::NewFrame();
+    const bool is_init_ok = m_error.empty() && m_game_data_initialized;
 
-    if (m_error.empty() && m_game_data_initialized) {
+    if (is_init_ok) {
         // Write default config once if it doesn't exist.
         if (!std::exchange(m_created_default_cfg, true)) {
             if (!fs::exists({utility::widen("re2_fw_config.txt")})) {
                 save_config();
             }
         }
-
-        // Run mod frame callbacks.
-        m_mods->on_frame();
     }
+
+    consume_input();
+
+    ImGui_ImplDX12_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+
+    if (is_init_ok) {
+        // Run mod frame callbacks.
+        m_mods->on_pre_imgui_frame();
+    }
+
+    ImGui::NewFrame();
+
+    call_on_frame();
 
     draw_ui();
     m_last_draw_ui = m_draw_ui;
@@ -303,44 +474,95 @@ void REFramework::on_frame_d3d12() {
     ImGui::EndFrame();
     ImGui::Render();
 
-    // Rendering
-    UINT back_buffer_idx = m_d3d12_hook->get_swap_chain()->GetCurrentBackBufferIndex();
-    FrameContextD3D12* frame_context = &m_frame_context_d3d12[back_buffer_idx];
-    frame_context->command_allocator->Reset();
+    auto swapchain = m_d3d12_hook->get_swap_chain();
+    auto* context = &m_d3d12.frame_context[3];
+    
+    context->command_allocator->Reset();
 
+    // Draw to our render target.
     D3D12_RESOURCE_BARRIER barrier{};
     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-    barrier.Transition.pResource = m_main_render_target_resource_d3d12[back_buffer_idx];
+    barrier.Transition.pResource = m_d3d12.rt_resources[3];
     barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
-    m_pd3d_command_list_d3d12->Reset(frame_context->command_allocator, NULL);
-    m_pd3d_command_list_d3d12->ResourceBarrier(1, &barrier);
 
-    // Render Dear ImGui graphics
-    m_pd3d_command_list_d3d12->OMSetRenderTargets(1, &m_main_render_target_descriptor_d3d12[back_buffer_idx], FALSE, NULL);
-    m_pd3d_command_list_d3d12->SetDescriptorHeaps(1, &m_pd3d_srv_desc_heap_d3d12);
-    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_pd3d_command_list_d3d12);
+    m_d3d12.command_list->Reset(context->command_allocator, nullptr);
+    m_d3d12.command_list->ResourceBarrier(1, &barrier);
+
+    float clear_color[]{0.0f, 0.0f, 0.0f, 0.0f};
+    m_d3d12.command_list->ClearRenderTargetView(m_d3d12.cpu_rtvs[3], clear_color, 0, nullptr);
+
+    m_d3d12.command_list->OMSetRenderTargets(1, &m_d3d12.cpu_rtvs[3], FALSE, NULL);
+    m_d3d12.command_list->SetDescriptorHeaps(1, &m_d3d12.srv_desc_heap);
+    ImGui_ImplDX12_RenderDrawData(ImGui::GetDrawData(), m_d3d12.command_list);
     barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
     barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
-    m_pd3d_command_list_d3d12->ResourceBarrier(1, &barrier);
-    m_pd3d_command_list_d3d12->Close();
+    m_d3d12.command_list->ResourceBarrier(1, &barrier);
 
-    m_pd3d_command_queue_d3d12->ExecuteCommandLists(1, (ID3D12CommandList* const*)&m_pd3d_command_list_d3d12);
+    // Draw to the back buffer.
+    auto bb_index = swapchain->GetCurrentBackBufferIndex();
+    context = &m_d3d12.frame_context[bb_index];
+    barrier.Transition.pResource = m_d3d12.rt_resources[bb_index];
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    m_d3d12.command_list->Reset(context->command_allocator, NULL);
+    m_d3d12.command_list->ResourceBarrier(1, &barrier);
 
-    if (m_error.empty() && m_game_data_initialized) {
+    m_d3d12.command_list->OMSetRenderTargets(1, &m_d3d12.cpu_rtvs[bb_index], FALSE, NULL);
+    m_d3d12.command_list->SetDescriptorHeaps(1, &m_d3d12.srv_desc_heap);
+
+    // Setup a draw list to draw our render target to the back buffer.
+    static ImDrawList dl{ImGui::GetDrawListSharedData()};
+    static ImDrawData dd{};
+    static ImDrawList* dls[]{&dl};
+	auto w = (float)m_d3d12.rt_width;
+	auto h = (float)m_d3d12.rt_height;
+
+    dl._ResetForNewFrame();
+    dl.PushClipRect(ImVec2{0.0f, 0.0f}, ImVec2{w, h});
+	dl.AddImage(*(ImTextureID*)&m_d3d12.gpu_srvs[3], ImVec2{0.0f, 0.0f}, ImVec2{w, h});
+    dl.PopClipRect();
+
+	dd.Valid = true;
+    dd.CmdLists = dls;
+    dd.CmdListsCount = 1;
+    dd.TotalVtxCount = dl.VtxBuffer.Size;
+    dd.TotalIdxCount = dl.IdxBuffer.Size;
+    dd.DisplayPos = ImVec2{0.0f, 0.0f};
+    dd.DisplaySize = ImGui::GetIO().DisplaySize;
+    dd.FramebufferScale = ImGui::GetIO().DisplayFramebufferScale;
+
+    ImGui_ImplDX12_RenderDrawData(&dd, m_d3d12.command_list);
+
+    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+    m_d3d12.command_list->ResourceBarrier(1, &barrier);
+    m_d3d12.command_list->Close();
+
+    m_d3d12.command_queue->ExecuteCommandLists(1, (ID3D12CommandList* const*)&m_d3d12.command_list);
+
+    if (is_init_ok) {
         m_mods->on_post_frame();
     }
 }
 
 void REFramework::on_post_present_d3d12() {
     if (!m_error.empty() || !m_initialized || !m_game_data_initialized) {
+        if (m_last_present_time <= std::chrono::steady_clock::now()){
+            m_last_present_time = std::chrono::steady_clock::now();
+        }
+
         return;
     }
     
     for (auto& mod : m_mods->get_mods()) {
         mod->on_post_present();
+    }
+
+    if (m_last_present_time <= std::chrono::steady_clock::now()){
+        m_last_present_time = std::chrono::steady_clock::now();
     }
 }
 
@@ -365,10 +587,13 @@ void REFramework::on_reset() {
         m_mods->on_device_reset();
     }
 
+    m_first_initialize = false;
     m_initialized = false;
 }
 
 bool REFramework::on_message(HWND wnd, UINT message, WPARAM w_param, LPARAM l_param) {
+    m_last_message_time = std::chrono::steady_clock::now();
+
     if (!m_initialized) {
         return true;
     }
@@ -525,7 +750,6 @@ void REFramework::draw_ui() {
 
     ImGui::SetNextWindowPos(ImVec2(50, 50), ImGuiCond_::ImGuiCond_Once);
     ImGui::SetNextWindowSize(ImVec2(300, 500), ImGuiCond_::ImGuiCond_Once);
-
     ImGui::Begin("REFramework", &m_draw_ui);
     ImGui::Text("Menu Key: Insert");
     ImGui::Checkbox("Transparency", &m_ui_option_transparent);
@@ -550,6 +774,9 @@ void REFramework::draw_ui() {
         ImGui::TextWrapped("REFramework error: %s", m_error.c_str());
     }
 
+    m_last_window_pos = ImGui::GetWindowPos();
+    m_last_window_size = ImGui::GetWindowSize();
+
     ImGui::End();
 }
 
@@ -562,7 +789,7 @@ void REFramework::draw_about() {
 
     ImGui::Text("Author: praydog");
     ImGui::Text("Inspired by the Kanan project.");
-    ImGui::Text("https://github.com/praydog/RE2-Mod-Framework");
+    ImGui::Text("https://github.com/praydog/REFramework");
 
     if (ImGui::CollapsingHeader("Licenses")) {
         ImGui::TreePush("Licenses");
@@ -659,6 +886,16 @@ bool REFramework::initialize() {
         return true;
     }
 
+    if (m_first_initialize) {
+        m_frames_since_init = 0;
+        m_first_initialize = false;
+    }
+
+    if (m_frames_since_init < 60) {
+        m_frames_since_init++;
+        return false;
+    }
+
     if (m_is_d3d11) {
         spdlog::info("Attempting to initialize DirectX 11");
 
@@ -671,6 +908,8 @@ bool REFramework::initialize() {
 
         // Wait.
         if (device == nullptr || swap_chain == nullptr) {
+            m_first_initialize = true;
+
             spdlog::info("Device or SwapChain null. DirectX 12 may be in use. Unhooking D3D11...");
 
             // We unhook D3D11
@@ -697,20 +936,6 @@ bool REFramework::initialize() {
         swap_chain->GetDesc(&swap_desc);
 
         m_wnd = swap_desc.OutputWindow;
-
-        // Explicitly call destructor first
-        m_windows_message_hook.reset();
-        m_windows_message_hook = std::make_unique<WindowsMessageHook>(m_wnd);
-        m_windows_message_hook->on_message = [this](auto wnd, auto msg, auto w_param, auto l_param) {
-            return on_message(wnd, msg, w_param, l_param);
-        };
-
-        // just do this instead of rehooking because there's no point.
-        if (m_first_frame) {
-            m_dinput_hook = std::make_unique<DInputHook>(m_wnd);
-        } else {
-            m_dinput_hook->set_window(m_wnd);
-        }
 
         spdlog::info("Creating render target");
 
@@ -749,10 +974,26 @@ bool REFramework::initialize() {
         auto device = m_d3d12_hook->get_device();
         auto swap_chain = m_d3d12_hook->get_swap_chain();
 
-        if (device == nullptr || swap_chain == nullptr || m_pd3d_command_queue_d3d12 == nullptr) {
+        if (m_d3d12.command_queue != nullptr) {
+            if (IsBadReadPtr(m_d3d12.command_queue, sizeof(ID3D12CommandQueue*))) {
+                m_d3d12.command_queue = nullptr;
+            } else {
+                // query interface to check if the command queue is valid
+                ID3D12CommandQueue* queue = nullptr;
+                if (SUCCEEDED(m_d3d12.command_queue->QueryInterface(__uuidof(ID3D12CommandQueue), reinterpret_cast<void**>(&queue)))) {
+                    m_d3d12.command_queue = queue;
+                } else {
+                    m_d3d12.command_queue = nullptr;
+                }
+            }
+        }
+
+        if (device == nullptr || swap_chain == nullptr || m_d3d12.command_queue == nullptr) {
+            m_first_initialize = true;
+
             spdlog::info("Device: {:x}", (uintptr_t)device);
             spdlog::info("SwapChain: {:x}", (uintptr_t)swap_chain);
-            spdlog::info("CommandQueue: {:x}", (uintptr_t)m_pd3d_command_queue_d3d12);
+            spdlog::info("CommandQueue: {:x}", (uintptr_t)m_d3d12.command_queue);
 
             spdlog::info("Device or SwapChain null. DirectX 11 may be in use. Unhooking D3D12...");
 
@@ -776,18 +1017,6 @@ bool REFramework::initialize() {
         swap_chain->GetDesc(&swap_desc);
 
         m_wnd = swap_desc.OutputWindow;
-
-        m_windows_message_hook.reset();
-        m_windows_message_hook = std::make_unique<WindowsMessageHook>(m_wnd);
-        m_windows_message_hook->on_message = [this](auto wnd, auto msg, auto w_param, auto l_param) {
-            return on_message(wnd, msg, w_param, l_param);
-        };
-
-        if (m_first_frame) {
-            m_dinput_hook = std::make_unique<DInputHook>(m_wnd);
-        } else {
-            m_dinput_hook->set_window(m_wnd);
-        }
 
         if (!create_rtv_descriptor_heap_d3d12()) {
             spdlog::error("Failed to create RTV Descriptor.");
@@ -823,9 +1052,9 @@ bool REFramework::initialize() {
             return false;
         }
 
-        if (!ImGui_ImplDX12_Init(device, s_NUM_FRAMES_IN_FLIGHT_D3D12, DXGI_FORMAT_R8G8B8A8_UNORM, m_pd3d_srv_desc_heap_d3d12,
-                m_pd3d_srv_desc_heap_d3d12->GetCPUDescriptorHandleForHeapStart(),
-                m_pd3d_srv_desc_heap_d3d12->GetGPUDescriptorHandleForHeapStart())) {
+        if (!ImGui_ImplDX12_Init(device, D3D12::s_NUM_FRAMES_IN_FLIGHT_D3D12, DXGI_FORMAT_R8G8B8A8_UNORM, m_d3d12.srv_desc_heap,
+                m_d3d12.srv_desc_heap->GetCPUDescriptorHandleForHeapStart(),
+                m_d3d12.srv_desc_heap->GetGPUDescriptorHandleForHeapStart())) {
             spdlog::error("Failed to initialize ImGui ImplDX12.");
             return false;
         }
@@ -843,6 +1072,14 @@ bool REFramework::initialize() {
         m_render_height = m_d3d12_hook->get_render_height();*/
     } else {
         return false;
+    }
+
+    initialize_windows_message_hook();
+
+    if (m_first_frame) {
+        m_dinput_hook = std::make_unique<DInputHook>(m_wnd);
+    } else {
+        m_dinput_hook->set_window(m_wnd);
     }
 
     if (m_first_frame) {
@@ -875,23 +1112,102 @@ bool REFramework::initialize() {
     return true;
 }
 
+bool REFramework::initialize_windows_message_hook() {
+    if (m_wnd == 0) {
+        return false;
+    }
+
+    if (m_first_frame || m_message_hook_requested || m_windows_message_hook == nullptr) {
+        m_last_message_time = std::chrono::steady_clock::now();
+        m_windows_message_hook.reset();
+        m_windows_message_hook = std::make_unique<WindowsMessageHook>(m_wnd);
+        m_windows_message_hook->on_message = [this](auto wnd, auto msg, auto w_param, auto l_param) {
+            return on_message(wnd, msg, w_param, l_param);
+        };
+
+        m_message_hook_requested = false;
+        return true;
+    }
+
+    m_message_hook_requested = false;
+    return false;
+}
+
+void REFramework::call_on_frame() {
+    const bool is_init_ok = m_error.empty() && m_game_data_initialized;
+
+    if (is_init_ok) {
+        // Run mod frame callbacks.
+        m_mods->on_frame();
+    }
+}
+
 // DirectX 11 Initialization methods
 
 void REFramework::create_render_target_d3d11() {
     cleanup_render_target_d3d11();
 
-    ID3D11Texture2D* back_buffer{nullptr};
-    if (m_d3d11_hook->get_swap_chain()->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&back_buffer) == S_OK) {
-        m_d3d11_hook->get_device()->CreateRenderTargetView(back_buffer, NULL, &m_main_render_target_view_d3d11);
-        back_buffer->Release();
+    auto swapchain = m_d3d11_hook->get_swap_chain();
+    auto device = m_d3d11_hook->get_device();
+
+    // Get back buffer.
+    ComPtr<ID3D11Texture2D> backbuffer{};
+
+    if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer)))) {
+        spdlog::error("[D3D11] Failed to get back buffer!");
+        return;
     }
+
+    // Create a render target view of the back buffer.
+    if (FAILED(device->CreateRenderTargetView(backbuffer.Get(), nullptr, &m_d3d11.bb_rtv))) {
+        spdlog::error("[D3D11] Failed to create back buffer render target view!");
+        return;
+    }
+
+    // Get backbuffer description.
+    D3D11_TEXTURE2D_DESC backbuffer_desc{};
+
+    backbuffer->GetDesc(&backbuffer_desc);
+
+    backbuffer_desc.BindFlags |= D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+
+    // Create our blank render target.
+    if (FAILED(device->CreateTexture2D(&backbuffer_desc, nullptr, &m_d3d11.blank_rt))) {
+        spdlog::error("[D3D11] Failed to create render target texture!");
+        return;
+    }
+
+    // Create our render target.
+    if (FAILED(device->CreateTexture2D(&backbuffer_desc, nullptr, &m_d3d11.rt))) {
+        spdlog::error("[D3D11] Failed to create render target texture!");
+        return;
+    }
+
+    // Create our blank render target view.
+    if (FAILED(device->CreateRenderTargetView(m_d3d11.blank_rt.Get(), nullptr, &m_d3d11.blank_rt_rtv))) {
+        spdlog::error("[D3D11] Failed to create render terget view!");
+        return;
+    }
+
+
+    // Create our render target view.
+    if (FAILED(device->CreateRenderTargetView(m_d3d11.rt.Get(), nullptr, &m_d3d11.rt_rtv))) {
+        spdlog::error("[D3D11] Failed to create render terget view!");
+        return;
+    }
+
+    // Create our render target shader resource view.
+    if (FAILED(device->CreateShaderResourceView(m_d3d11.rt.Get(), nullptr, &m_d3d11.rt_srv))) {
+        spdlog::error("[D3D11] Failed to create shader resource view!");
+        return;
+    }
+
+    m_d3d11.rt_width = backbuffer_desc.Width;
+    m_d3d11.rt_height = backbuffer_desc.Height;
 }
 
 void REFramework::cleanup_render_target_d3d11() {
-    if (m_main_render_target_view_d3d11 != nullptr) {
-        m_main_render_target_view_d3d11->Release();
-        m_main_render_target_view_d3d11 = nullptr;
-    }
+    m_d3d11 = {};
 }
 
 // DirectX 12 Initialization methods
@@ -901,18 +1217,18 @@ bool REFramework::create_rtv_descriptor_heap_d3d12() {
 
     D3D12_DESCRIPTOR_HEAP_DESC desc = {};
     desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
-    desc.NumDescriptors = s_NUM_BACK_BUFFERS_D3D12;
+    desc.NumDescriptors = D3D12::s_NUM_BACK_BUFFERS_D3D12;
     desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
     desc.NodeMask = 1;
-    if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_pd3d_rtv_desc_heap_d3d12)) != S_OK) {
+    if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_d3d12.rtv_desc_heap)) != S_OK) {
         return false;
     }
 
     SIZE_T rtv_descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
-    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = m_pd3d_rtv_desc_heap_d3d12->GetCPUDescriptorHandleForHeapStart();
+    D3D12_CPU_DESCRIPTOR_HANDLE rtv_handle = m_d3d12.rtv_desc_heap->GetCPUDescriptorHandleForHeapStart();
 
-    for (UINT i = 0; i < s_NUM_BACK_BUFFERS_D3D12; i++) {
-        m_main_render_target_descriptor_d3d12[i] = rtv_handle;
+    for (auto&& rtv : m_d3d12.cpu_rtvs) {
+        rtv = rtv_handle;
         rtv_handle.ptr += rtv_descriptor_size;
     }
 
@@ -920,22 +1236,38 @@ bool REFramework::create_rtv_descriptor_heap_d3d12() {
 }
 
 bool REFramework::create_srv_descriptor_heap_d3d12() {
+    auto device = m_d3d12_hook->get_device();
+
     D3D12_DESCRIPTOR_HEAP_DESC desc = {};
     desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    desc.NumDescriptors = 1;
+    desc.NumDescriptors = D3D12::s_NUM_BACK_BUFFERS_D3D12;
     desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 
-    if (m_d3d12_hook->get_device()->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_pd3d_srv_desc_heap_d3d12)) != S_OK) {
+    if (device->CreateDescriptorHeap(&desc, IID_PPV_ARGS(&m_d3d12.srv_desc_heap)) != S_OK) {
         return false;
+    }
+
+    auto srv_descriptor_size = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    auto cpu_handle = m_d3d12.srv_desc_heap->GetCPUDescriptorHandleForHeapStart();
+    auto gpu_handle = m_d3d12.srv_desc_heap->GetGPUDescriptorHandleForHeapStart();
+
+    for (auto&& srv : m_d3d12.cpu_srvs) {
+        srv = cpu_handle;
+        cpu_handle.ptr += srv_descriptor_size;
+    }
+
+    for (auto&& srv : m_d3d12.gpu_srvs) {
+        srv = gpu_handle;
+        gpu_handle.ptr += srv_descriptor_size;
     }
 
     return true;
 }
 
 bool REFramework::create_command_allocator_d3d12() {
-    for (UINT i = 0; i < s_NUM_FRAMES_IN_FLIGHT_D3D12; i++) {
+    for (UINT i = 0; i < D3D12::s_NUM_FRAMES_IN_FLIGHT_D3D12; i++) {
         auto res = m_d3d12_hook->get_device()->CreateCommandAllocator(
-            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_frame_context_d3d12[i].command_allocator));
+            D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_d3d12.frame_context[i].command_allocator));
 
         if (res != S_OK) {
             return false;
@@ -947,9 +1279,9 @@ bool REFramework::create_command_allocator_d3d12() {
 
 bool REFramework::create_command_list_d3d12() {
     auto res = m_d3d12_hook->get_device()->CreateCommandList(
-        0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_frame_context_d3d12[0].command_allocator, NULL, IID_PPV_ARGS(&m_pd3d_command_list_d3d12));
+        0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_d3d12.frame_context[0].command_allocator, NULL, IID_PPV_ARGS(&m_d3d12.command_list));
 
-    if (res != S_OK || m_pd3d_command_list_d3d12->Close() != S_OK) {
+    if (res != S_OK || m_d3d12.command_list->Close() != S_OK) {
         return false;
     }
 
@@ -957,22 +1289,62 @@ bool REFramework::create_command_list_d3d12() {
 }
 
 void REFramework::cleanup_render_target_d3d12() {
-    for (UINT i = 0; i < s_NUM_BACK_BUFFERS_D3D12; i++) {
-        if (m_main_render_target_resource_d3d12[i]) {
-            m_main_render_target_resource_d3d12[i]->Release();
-            m_main_render_target_resource_d3d12[i] = NULL;
+    for (UINT i = 0; i < D3D12::s_NUM_BACK_BUFFERS_D3D12; i++) {
+        if (m_d3d12.rt_resources[i]) {
+            m_d3d12.rt_resources[i]->Release();
+            m_d3d12.rt_resources[i] = NULL;
         }
     }
+
+    m_d3d12.blank_rt.Reset();
+    m_d3d12.rt.Reset();
 }
 
 void REFramework::create_render_target_d3d12() {
     cleanup_render_target_d3d12();
 
-    for (UINT i = 0; i < s_NUM_BACK_BUFFERS_D3D12; i++) {
+    // Create back buffer rtvs.
+    for (UINT i = 0; i < D3D12::s_NUM_BACK_BUFFERS_D3D12 - 1; i++) {
         ID3D12Resource* back_buffer{nullptr};
         if (m_d3d12_hook->get_swap_chain()->GetBuffer(i, IID_PPV_ARGS(&back_buffer)) == S_OK) {
-            m_d3d12_hook->get_device()->CreateRenderTargetView(back_buffer, NULL, m_main_render_target_descriptor_d3d12[i]);
-            m_main_render_target_resource_d3d12[i] = back_buffer;
+            m_d3d12_hook->get_device()->CreateRenderTargetView(back_buffer, NULL, m_d3d12.cpu_rtvs[i]);
+            m_d3d12.rt_resources[i] = back_buffer;
         }
+    }
+
+    auto& hook = g_framework->get_d3d12_hook();
+    auto device = hook->get_device();
+    auto swapchain = hook->get_swap_chain();
+
+    ComPtr<ID3D12Resource> backbuffer{};
+
+    if (FAILED(swapchain->GetBuffer(0, IID_PPV_ARGS(&backbuffer)))) {
+        spdlog::error("[REFramework] [D3D12] Failed to get back buffer.");
+    }
+
+    auto backbuffer_desc = backbuffer->GetDesc();
+
+    D3D12_HEAP_PROPERTIES heap_props{};
+    heap_props.Type = D3D12_HEAP_TYPE_DEFAULT;
+    heap_props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_UNKNOWN;
+    heap_props.MemoryPoolPreference = D3D12_MEMORY_POOL_UNKNOWN;
+
+    if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &backbuffer_desc, D3D12_RESOURCE_STATE_PRESENT, nullptr,
+            IID_PPV_ARGS(&m_d3d12.rt)))) {
+        spdlog::error("[REFramework] [D3D12] Failed to create render target texture.");
+    }
+
+    // Create rtv of our rt.
+    device->CreateRenderTargetView(m_d3d12.rt.Get(), nullptr, m_d3d12.cpu_rtvs[3]);
+    device->CreateShaderResourceView(m_d3d12.rt.Get(), nullptr, m_d3d12.cpu_srvs[3]);
+
+    m_d3d12.rt_resources[3] = m_d3d12.rt.Get();
+    m_d3d12.rt_width = (uint32_t)backbuffer_desc.Width;
+    m_d3d12.rt_height = (uint32_t)backbuffer_desc.Height;
+
+    // Create a blank render target too.
+    if (FAILED(device->CreateCommittedResource(&heap_props, D3D12_HEAP_FLAG_NONE, &backbuffer_desc, D3D12_RESOURCE_STATE_PRESENT, nullptr,
+            IID_PPV_ARGS(&m_d3d12.blank_rt)))) {
+        spdlog::error("[REFramework] [D3D12] Failed to create blank render target texture.");
     }
 }

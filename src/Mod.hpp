@@ -8,7 +8,8 @@
 #include <unordered_map>
 #include <memory>
 
-#include <imgui/imgui.h>
+#include <imgui.h>
+#include <sol/sol.hpp>
 
 #include "sdk/ReClass.hpp"
 #include "utility/Config.hpp"
@@ -302,7 +303,13 @@ public:
     // Called when REFramework::initialize finishes in the first render frame
     // Returns an error string if it fails
     virtual std::optional<std::string> on_initialize() { return std::nullopt; };
+    virtual void on_lua_state_created(sol::state& lua) {};
+    virtual void on_lua_state_destroyed(sol::state& lua) {};
 
+    // This gets called after updating stuff like keyboard/mouse input to imgui
+    // can be used to override these inputs e.g. with a custom input system
+    // like VR controllers
+    virtual void on_pre_imgui_frame() {};
     // Functionally equivalent, but on_frame will always get called, on_draw_ui can be disabled by REFramework
     virtual void on_frame() {};
     virtual void on_post_frame() {}; // after imgui rendering is done
@@ -320,4 +327,14 @@ public:
     virtual void on_update_camera_controller(RopewayPlayerCameraController* controller) {};
     virtual void on_pre_update_camera_controller2(RopewayPlayerCameraController* controller) {};
     virtual void on_update_camera_controller2(RopewayPlayerCameraController* controller) {};
+    virtual bool on_pre_gui_draw_element(REComponent* gui_element, void* primitive_context) { return true; };
+    virtual void on_gui_draw_element(REComponent* gui_element, void* primitive_context) {};
+    virtual void on_pre_update_before_lock_scene(void* ctx) {};
+    virtual void on_update_before_lock_scene(void* ctx) {};
+    virtual void on_pre_lightshaft_draw(void* shaft, void* render_context) {};
+    virtual void on_lightshaft_draw(void* shaft, void* render_context) {};
+    // via.application entry hooks
+    // For a list of possible entries, see via.ModuleEntry enum
+    virtual void on_pre_application_entry(void* entry, const char* name, size_t hash) {};
+    virtual void on_application_entry(void* entry, const char* name, size_t hash) {};
 };

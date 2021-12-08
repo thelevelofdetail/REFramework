@@ -8,6 +8,8 @@
 #include "mods/ManualFlashlight.hpp"
 #include "mods/FreeCam.hpp"
 #include "mods/Scene.hpp"
+#include "mods/ScriptRunner.hpp"
+#include "mods/APIProxy.hpp"
 
 #include "Mods.hpp"
 
@@ -19,6 +21,10 @@ Mods::Mods()
 
 #ifndef BAREBONES
     m_mods.emplace_back(std::make_unique<Hooks>());
+
+    m_mods.emplace_back(ScriptRunner::get());
+    m_mods.emplace_back(APIProxy::get());
+
 #ifndef RE8
 
 #if defined(RE2) || defined(RE3)
@@ -69,6 +75,12 @@ std::optional<std::string> Mods::on_initialize() const {
     }
 
     return std::nullopt;
+}
+
+void Mods::on_pre_imgui_frame() const {
+    for (auto& mod : m_mods) {
+        mod->on_pre_imgui_frame();
+    }
 }
 
 void Mods::on_frame() const {

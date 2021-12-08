@@ -4,8 +4,6 @@ SET(GLM_TEST_ENABLE OFF CACHE BOOL "Build unit tests" FORCE)
 SET(BUILD_STATIC_LIBS ON)
 add_subdirectory(glm)
 
-project(minhook)
-
 add_library(minhook STATIC
             minhook/src/buffer.c
             minhook/src/buffer.h
@@ -19,8 +17,7 @@ add_library(minhook STATIC
             minhook/src/hde/pstdint.h
             minhook/src/hde/table32.h
             minhook/src/hde/table64.h)
-
-project(imgui)
+target_include_directories(minhook INTERFACE minhook/include/ minhook/src/hde)
 
 add_library(imgui STATIC
             imgui/imgui_demo.cpp
@@ -28,9 +25,56 @@ add_library(imgui STATIC
             imgui/imgui_draw.cpp
             imgui/imgui_tables.cpp
             imgui/imgui.cpp)
+target_include_directories(imgui PUBLIC imgui/ ${CMAKE_SOURCE_DIR}/src/re2-imgui/)
+target_compile_definitions(imgui PUBLIC IMGUI_USER_CONFIG="re2_imconfig.hpp")
+
+add_library(lua STATIC
+            lua/src/lapi.c
+            lua/src/lauxlib.c
+            lua/src/lbaselib.c
+            lua/src/lcode.c
+            lua/src/lcorolib.c
+            lua/src/lctype.c
+            lua/src/ldblib.c
+            lua/src/ldebug.c
+            lua/src/ldo.c
+            lua/src/ldump.c
+            lua/src/lfunc.c
+            lua/src/lgc.c
+            lua/src/linit.c
+            lua/src/liolib.c
+            lua/src/llex.c
+            lua/src/lmathlib.c
+            lua/src/lmem.c
+            lua/src/loadlib.c
+            lua/src/lobject.c
+            lua/src/lopcodes.c
+            lua/src/loslib.c
+            lua/src/lparser.c
+            lua/src/lstate.c
+            lua/src/lstring.c
+            lua/src/lstrlib.c
+            lua/src/ltable.c
+            lua/src/ltablib.c
+            lua/src/ltm.c
+            #lua/src/lua.c
+            #lua/src/luac.c
+            lua/src/lundump.c
+            lua/src/lutf8lib.c
+            lua/src/lvm.c
+            lua/src/lzio.c)
+target_include_directories(lua INTERFACE lua/src/)
+
+add_library(sol2 INTERFACE)
+target_include_directories(sol2 INTERFACE sol2/single/include/)
 
 add_library(nlohmann_json INTERFACE)
 target_include_directories(nlohmann_json INTERFACE nlohmann/)
 
+# TODO: maybe get all dependencies this way?
+include(FetchContent)
 
-target_compile_definitions(imgui PUBLIC IMGUI_USER_CONFIG="../src/re2-imgui/re2_imconfig.hpp")
+FetchContent_Declare(xbyak
+                     GIT_REPOSITORY "https://github.com/herumi/xbyak.git"
+                     GIT_TAG "v6.00")
+FetchContent_MakeAvailable(xbyak)
