@@ -80,7 +80,8 @@ target_include_directories(nlohmann_json INTERFACE nlohmann/)
 # TODO: maybe get all dependencies this way?
 include(FetchContent)
 
-FetchContent_Declare(xbyak
-                     GIT_REPOSITORY "https://github.com/herumi/xbyak.git"
-                     GIT_TAG "v6.00")
-FetchContent_MakeAvailable(xbyak)
+FetchContent_Declare(asmjit
+                     GIT_REPOSITORY "https://github.com/asmjit/asmjit.git"
+                     GIT_TAG "2a706fd2ba355808cada31ac1eed8ce28caa6b37")
+set(ASMJIT_STATIC ON)
+FetchContent_MakeAvailable(asmjit)

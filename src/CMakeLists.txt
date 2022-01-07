@@ -173,7 +173,7 @@ add_library(${GAME_NAME} SHARED
             ${BINDINGS_SRC}
 )
 
-target_link_libraries(${GAME_NAME} PUBLIC xbyak nlohmann_json spdlog lua sol2 imgui minhook d3d11 glm_static shlwapi openvr delayimp)
+target_link_libraries(${GAME_NAME} PUBLIC asmjit::asmjit nlohmann_json spdlog lua sol2 imgui minhook d3d11 glm_static shlwapi openvr delayimp)
 target_compile_options(${GAME_NAME} PUBLIC /GS- /bigobj)
 target_compile_features(${GAME_NAME} PUBLIC cxx_std_20)
 
