@@ -1,21 +1,21 @@
 #include <spdlog/spdlog.h>
 
-#include "mods/IntegrityCheckBypass.hpp"
-#include "mods/Hooks.hpp"
-#include "mods/Camera.hpp"
-#include "mods/FirstPerson.hpp"
-#include "mods/DeveloperTools.hpp"
-#include "mods/ManualFlashlight.hpp"
-#include "mods/FreeCam.hpp"
-#include "mods/Scene.hpp"
-#include "mods/VR.hpp"
-#include "mods/ScriptRunner.hpp"
 #include "mods/APIProxy.hpp"
+#include "mods/Camera.hpp"
+#include "mods/DeveloperTools.hpp"
+#include "mods/FirstPerson.hpp"
+#include "mods/FreeCam.hpp"
+#include "mods/Hooks.hpp"
+#include "mods/IntegrityCheckBypass.hpp"
+#include "mods/ManualFlashlight.hpp"
+#include "mods/PluginLoader.hpp"
+#include "mods/Scene.hpp"
+#include "mods/ScriptRunner.hpp"
+#include "mods/VR.hpp"
 
 #include "Mods.hpp"
 
-Mods::Mods()
-{
+Mods::Mods() {
 #if defined(RE3) || defined(RE8) || defined(MHRISE)
     m_mods.emplace_back(std::make_unique<IntegrityCheckBypass>());
 #endif
@@ -57,6 +57,9 @@ Mods::Mods()
         m_mods.emplace_back(tool);
     }
 #endif
+
+    // Load plugins last.
+    m_mods.emplace_back(std::make_unique<PluginLoader>());
 }
 
 std::optional<std::string> Mods::on_initialize() const {
