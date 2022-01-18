@@ -24,8 +24,6 @@ Mods::Mods() {
     m_mods.emplace_back(std::make_unique<Hooks>());
 
     m_mods.emplace_back(VR::get());
-    m_mods.emplace_back(ScriptRunner::get());
-    m_mods.emplace_back(APIProxy::get());
 
 #ifndef RE8
 
@@ -58,8 +56,9 @@ Mods::Mods() {
     }
 #endif
 
-    // Load plugins last.
     m_mods.emplace_back(std::make_unique<PluginLoader>());
+    m_mods.emplace_back(ScriptRunner::get());
+    m_mods.emplace_back(APIProxy::get());
 }
 
 std::optional<std::string> Mods::on_initialize() const {
